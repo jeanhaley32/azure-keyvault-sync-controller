@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 )
@@ -29,7 +30,12 @@ func main() {
 		log.Fatalf("Error creating dynamic client: %v", err)
 	}
 
-	controller := NewController(dynamicClient)
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating kubernetes clientset: %v", err)
+	}
+
+	controller := NewController(dynamicClient, clientset)
 	controller.Run()
 }
 

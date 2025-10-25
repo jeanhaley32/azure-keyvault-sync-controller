@@ -1,0 +1,42 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: azure-keyvault-sync-controller
+  namespace: kube-system
+  labels:
+    app: azure-keyvault-sync-controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: azure-keyvault-sync-controller
+  labels:
+    app: azure-keyvault-sync-controller
+rules:
+  # SecretProviderClass permissions
+  - apiGroups: ["secrets-store.csi.x-k8s.io"]
+    resources: ["secretproviderclasses"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # Token request permissions (for service account impersonation)
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: azure-keyvault-sync-controller
+  labels:
+    app: azure-keyvault-sync-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: azure-keyvault-sync-controller
+subjects:
+  - kind: ServiceAccount
+    name: azure-keyvault-sync-controller
+    namespace: kube-system
