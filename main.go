@@ -47,6 +47,17 @@ func getServiceAccount(obj *unstructured.Unstructured) (string, bool) {
 	return sa, exists
 }
 
+func isValidForSync(obj *unstructured.Unstructured) (bool, string) {
+	if !isSyncEnabled(obj) {
+		return false, ""
+	}
+	serviceAccount, hasServiceAccount := getServiceAccount(obj)
+	if !hasServiceAccount {
+		return false, ""
+	}
+	return true, serviceAccount
+}
+
 type SecretProviderClassCache struct {
 	mu      sync.RWMutex
 	objects map[string]*unstructured.Unstructured
@@ -116,6 +127,68 @@ func (ctrl *Controller) printCache() {
 	fmt.Println("---")
 }
 
+func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
+	namespace := obj.GetNamespace()
+	name := obj.GetName()
+	enabled := isSyncEnabled(obj)
+	serviceAccount, hasServiceAccount := getServiceAccount(obj)
+
+	if enabled {
+		if hasServiceAccount {
+			log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s)", namespace, name, serviceAccount)
+			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+			ctrl.printCache()
+		} else {
+			log.Printf("Event: ADDED %s/%s (sync enabled but missing service-account annotation, skipping)", namespace, name)
+		}
+	} else {
+		log.Printf("Event: ADDED %s/%s (sync disabled, skipping)", namespace, name)
+	}
+}
+
+func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
+	namespace := obj.GetNamespace()
+	name := obj.GetName()
+	enabled := isSyncEnabled(obj)
+	inCache := ctrl.cache.Has(namespace, name)
+	serviceAccount, hasServiceAccount := getServiceAccount(obj)
+
+	if enabled && !inCache {
+		if hasServiceAccount {
+			log.Printf("Event: MODIFIED %s/%s (annotation enabled, service-account: %s, adding to cache)", namespace, name, serviceAccount)
+			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+			ctrl.printCache()
+		} else {
+			log.Printf("Event: MODIFIED %s/%s (annotation enabled but missing service-account annotation, skipping)", namespace, name)
+		}
+	} else if !enabled && inCache {
+		log.Printf("Event: MODIFIED %s/%s (annotation disabled, removing from cache)", namespace, name)
+		ctrl.cache.Delete(namespace, name)
+		ctrl.printCache()
+	} else if enabled && inCache {
+		if hasServiceAccount {
+			log.Printf("Event: MODIFIED %s/%s (updating, service-account: %s)", namespace, name, serviceAccount)
+			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+		} else {
+			log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache)", namespace, name)
+			ctrl.cache.Delete(namespace, name)
+			ctrl.printCache()
+		}
+	} else {
+		log.Printf("Event: MODIFIED %s/%s (sync disabled, skipping)", namespace, name)
+	}
+}
+
+func (ctrl *Controller) handleDeleted(namespace, name string, inCache bool) {
+	if inCache {
+		log.Printf("Event: DELETED %s/%s", namespace, name)
+		ctrl.cache.Delete(namespace, name)
+		ctrl.printCache()
+	} else {
+		log.Printf("Event: DELETED %s/%s (not in cache, skipping)", namespace, name)
+	}
+}
+
 func (ctrl *Controller) handleEvent(event watch.Event) {
 	obj, ok := event.Object.(*unstructured.Unstructured)
 	if !ok {
@@ -125,58 +198,17 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 
 	namespace := obj.GetNamespace()
 	name := obj.GetName()
-	enabled := isSyncEnabled(obj)
 	inCache := ctrl.cache.Has(namespace, name)
-	serviceAccount, hasServiceAccount := getServiceAccount(obj)
 
 	switch event.Type {
 	case watch.Added:
-		if enabled {
-			if hasServiceAccount {
-				log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s)", namespace, name, serviceAccount)
-				ctrl.cache.Set(namespace, name, obj.DeepCopy())
-				ctrl.printCache()
-			} else {
-				log.Printf("Event: ADDED %s/%s (sync enabled but missing service-account annotation, skipping)", namespace, name)
-			}
-		} else {
-			log.Printf("Event: ADDED %s/%s (sync disabled, skipping)", namespace, name)
-		}
+		ctrl.handleAdded(obj)
 
 	case watch.Modified:
-		if enabled && !inCache {
-			if hasServiceAccount {
-				log.Printf("Event: MODIFIED %s/%s (annotation enabled, service-account: %s, adding to cache)", namespace, name, serviceAccount)
-				ctrl.cache.Set(namespace, name, obj.DeepCopy())
-				ctrl.printCache()
-			} else {
-				log.Printf("Event: MODIFIED %s/%s (annotation enabled but missing service-account annotation, skipping)", namespace, name)
-			}
-		} else if !enabled && inCache {
-			log.Printf("Event: MODIFIED %s/%s (annotation disabled, removing from cache)", namespace, name)
-			ctrl.cache.Delete(namespace, name)
-			ctrl.printCache()
-		} else if enabled && inCache {
-			if hasServiceAccount {
-				log.Printf("Event: MODIFIED %s/%s (updating, service-account: %s)", namespace, name, serviceAccount)
-				ctrl.cache.Set(namespace, name, obj.DeepCopy())
-			} else {
-				log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache)", namespace, name)
-				ctrl.cache.Delete(namespace, name)
-				ctrl.printCache()
-			}
-		} else {
-			log.Printf("Event: MODIFIED %s/%s (sync disabled, skipping)", namespace, name)
-		}
+		ctrl.handleModified(obj)
 
 	case watch.Deleted:
-		if inCache {
-			log.Printf("Event: DELETED %s/%s", namespace, name)
-			ctrl.cache.Delete(namespace, name)
-			ctrl.printCache()
-		} else {
-			log.Printf("Event: DELETED %s/%s (not in cache, skipping)", namespace, name)
-		}
+		ctrl.handleDeleted(namespace, name, inCache)
 
 	case watch.Error:
 		log.Printf("Event: ERROR %s/%s", namespace, name)
@@ -196,12 +228,12 @@ func (ctrl *Controller) syncCache() {
 	for _, item := range result.Items {
 		if isSyncEnabled(&item) {
 			enabledCount++
-			if _, hasServiceAccount := getServiceAccount(&item); hasServiceAccount {
-				ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
-				validCount++
-			} else {
-				log.Printf("Warning: %s/%s has sync enabled but missing service-account annotation", item.GetNamespace(), item.GetName())
-			}
+		}
+		if valid, _ := isValidForSync(&item); valid {
+			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
+			validCount++
+		} else if isSyncEnabled(&item) {
+			log.Printf("Warning: %s/%s has sync enabled but missing service-account annotation", item.GetNamespace(), item.GetName())
 		}
 	}
 
