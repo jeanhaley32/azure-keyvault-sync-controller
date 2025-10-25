@@ -1,5 +1,39 @@
 # Development Log
 
+## 2025-10-24
+
+### Learning Session: Kubernetes Watch Mechanisms
+
+Started with a learning-focused approach to understand Kubernetes controller patterns:
+
+**Initial Exploration:**
+- Created simple pod-watching controller to understand watch API
+- Learned about watch event types: ADDED, MODIFIED, DELETED, ERROR
+- Understood reconnection patterns and event handling
+- Cleaned up AI-generated markers (emojis, overly enthusiastic language)
+
+### Project Initialization
+
+**Repository Setup:**
+- Created GitHub repository: `jeanhaley32/azure-keyvault-sync-controller`
+- Added MIT License
+- Created initial README documenting project goals and architecture
+- Initialized Go module with k8s.io dependencies
+
+**First Controller Implementation:**
+- Switched from pod watching to SecretProviderClass resources
+- Implemented Kubernetes Dynamic Client for custom resource watching
+- Created thread-safe cache with `sync.RWMutex` for concurrent access
+- Added automatic reconnection on watch failures
+- Implemented periodic 5-minute resync loop to catch missed events
+- Basic event logging for ADDED, MODIFIED, DELETED events
+
+**Key Learning:**
+- Kubernetes watch connections can close unexpectedly, need reconnection logic
+- Dynamic client allows watching any resource without generated code
+- Cache must be thread-safe for concurrent watch and resync operations
+- Incremental testing after each change ensures functionality preservation
+
 ## 2025-10-25
 
 ### Refactor: File Structure Organization
