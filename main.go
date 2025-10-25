@@ -20,10 +20,21 @@ import (
 const (
 	resyncInterval = 5 * time.Minute
 	retryDelay     = 5 * time.Second
+
+	annotationKey   = "azure-keyvault-sync/enabled"
+	annotationValue = "true"
 )
 
 func cacheKey(namespace, name string) string {
 	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
+func isSyncEnabled(obj *unstructured.Unstructured) bool {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		return false
+	}
+	return annotations[annotationKey] == annotationValue
 }
 
 type SecretProviderClassCache struct {
@@ -47,6 +58,13 @@ func (c *SecretProviderClassCache) Delete(namespace, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.objects, cacheKey(namespace, name))
+}
+
+func (c *SecretProviderClassCache) Has(namespace, name string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, exists := c.objects[cacheKey(namespace, name)]
+	return exists
 }
 
 func (c *SecretProviderClassCache) List() []*unstructured.Unstructured {
@@ -97,19 +115,44 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 
 	namespace := obj.GetNamespace()
 	name := obj.GetName()
+	enabled := isSyncEnabled(obj)
+	inCache := ctrl.cache.Has(namespace, name)
 
 	switch event.Type {
 	case watch.Added:
-		log.Printf("Event: ADDED %s/%s", namespace, name)
-		ctrl.cache.Set(namespace, name, obj.DeepCopy())
-		ctrl.printCache()
+		if enabled {
+			log.Printf("Event: ADDED %s/%s (sync enabled)", namespace, name)
+			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+			ctrl.printCache()
+		} else {
+			log.Printf("Event: ADDED %s/%s (sync disabled, skipping)", namespace, name)
+		}
+
 	case watch.Modified:
-		log.Printf("Event: MODIFIED %s/%s", namespace, name)
-		ctrl.cache.Set(namespace, name, obj.DeepCopy())
+		if enabled && !inCache {
+			log.Printf("Event: MODIFIED %s/%s (annotation enabled, adding to cache)", namespace, name)
+			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+			ctrl.printCache()
+		} else if !enabled && inCache {
+			log.Printf("Event: MODIFIED %s/%s (annotation disabled, removing from cache)", namespace, name)
+			ctrl.cache.Delete(namespace, name)
+			ctrl.printCache()
+		} else if enabled && inCache {
+			log.Printf("Event: MODIFIED %s/%s (updating)", namespace, name)
+			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+		} else {
+			log.Printf("Event: MODIFIED %s/%s (sync disabled, skipping)", namespace, name)
+		}
+
 	case watch.Deleted:
-		log.Printf("Event: DELETED %s/%s", namespace, name)
-		ctrl.cache.Delete(namespace, name)
-		ctrl.printCache()
+		if inCache {
+			log.Printf("Event: DELETED %s/%s", namespace, name)
+			ctrl.cache.Delete(namespace, name)
+			ctrl.printCache()
+		} else {
+			log.Printf("Event: DELETED %s/%s (not in cache, skipping)", namespace, name)
+		}
+
 	case watch.Error:
 		log.Printf("Event: ERROR %s/%s", namespace, name)
 	}
@@ -123,11 +166,15 @@ func (ctrl *Controller) syncCache() {
 		return
 	}
 
+	enabledCount := 0
 	for _, item := range result.Items {
-		ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
+		if isSyncEnabled(&item) {
+			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
+			enabledCount++
+		}
 	}
 
-	log.Printf("Resync complete: %d objects in cache", len(result.Items))
+	log.Printf("Resync complete: %d objects in cache (%d total, %d enabled)", enabledCount, len(result.Items), enabledCount)
 }
 
 func (ctrl *Controller) startPeriodicResync() {
