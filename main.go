@@ -21,8 +21,9 @@ const (
 	resyncInterval = 5 * time.Minute
 	retryDelay     = 5 * time.Second
 
-	annotationKey   = "azure-keyvault-sync/enabled"
-	annotationValue = "true"
+	annotationEnabled        = "azure-keyvault-sync/enabled"
+	annotationServiceAccount = "azure-keyvault-sync/service-account"
+	annotationEnabledValue   = "true"
 )
 
 func cacheKey(namespace, name string) string {
@@ -34,7 +35,16 @@ func isSyncEnabled(obj *unstructured.Unstructured) bool {
 	if annotations == nil {
 		return false
 	}
-	return annotations[annotationKey] == annotationValue
+	return annotations[annotationEnabled] == annotationEnabledValue
+}
+
+func getServiceAccount(obj *unstructured.Unstructured) (string, bool) {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		return "", false
+	}
+	sa, exists := annotations[annotationServiceAccount]
+	return sa, exists
 }
 
 type SecretProviderClassCache struct {
@@ -117,29 +127,44 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 	name := obj.GetName()
 	enabled := isSyncEnabled(obj)
 	inCache := ctrl.cache.Has(namespace, name)
+	serviceAccount, hasServiceAccount := getServiceAccount(obj)
 
 	switch event.Type {
 	case watch.Added:
 		if enabled {
-			log.Printf("Event: ADDED %s/%s (sync enabled)", namespace, name)
-			ctrl.cache.Set(namespace, name, obj.DeepCopy())
-			ctrl.printCache()
+			if hasServiceAccount {
+				log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s)", namespace, name, serviceAccount)
+				ctrl.cache.Set(namespace, name, obj.DeepCopy())
+				ctrl.printCache()
+			} else {
+				log.Printf("Event: ADDED %s/%s (sync enabled but missing service-account annotation, skipping)", namespace, name)
+			}
 		} else {
 			log.Printf("Event: ADDED %s/%s (sync disabled, skipping)", namespace, name)
 		}
 
 	case watch.Modified:
 		if enabled && !inCache {
-			log.Printf("Event: MODIFIED %s/%s (annotation enabled, adding to cache)", namespace, name)
-			ctrl.cache.Set(namespace, name, obj.DeepCopy())
-			ctrl.printCache()
+			if hasServiceAccount {
+				log.Printf("Event: MODIFIED %s/%s (annotation enabled, service-account: %s, adding to cache)", namespace, name, serviceAccount)
+				ctrl.cache.Set(namespace, name, obj.DeepCopy())
+				ctrl.printCache()
+			} else {
+				log.Printf("Event: MODIFIED %s/%s (annotation enabled but missing service-account annotation, skipping)", namespace, name)
+			}
 		} else if !enabled && inCache {
 			log.Printf("Event: MODIFIED %s/%s (annotation disabled, removing from cache)", namespace, name)
 			ctrl.cache.Delete(namespace, name)
 			ctrl.printCache()
 		} else if enabled && inCache {
-			log.Printf("Event: MODIFIED %s/%s (updating)", namespace, name)
-			ctrl.cache.Set(namespace, name, obj.DeepCopy())
+			if hasServiceAccount {
+				log.Printf("Event: MODIFIED %s/%s (updating, service-account: %s)", namespace, name, serviceAccount)
+				ctrl.cache.Set(namespace, name, obj.DeepCopy())
+			} else {
+				log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache)", namespace, name)
+				ctrl.cache.Delete(namespace, name)
+				ctrl.printCache()
+			}
 		} else {
 			log.Printf("Event: MODIFIED %s/%s (sync disabled, skipping)", namespace, name)
 		}
@@ -167,14 +192,20 @@ func (ctrl *Controller) syncCache() {
 	}
 
 	enabledCount := 0
+	validCount := 0
 	for _, item := range result.Items {
 		if isSyncEnabled(&item) {
-			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
 			enabledCount++
+			if _, hasServiceAccount := getServiceAccount(&item); hasServiceAccount {
+				ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
+				validCount++
+			} else {
+				log.Printf("Warning: %s/%s has sync enabled but missing service-account annotation", item.GetNamespace(), item.GetName())
+			}
 		}
 	}
 
-	log.Printf("Resync complete: %d objects in cache (%d total, %d enabled)", enabledCount, len(result.Items), enabledCount)
+	log.Printf("Resync complete: %d objects in cache (%d total, %d enabled, %d valid)", validCount, len(result.Items), enabledCount, validCount)
 }
 
 func (ctrl *Controller) startPeriodicResync() {
