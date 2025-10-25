@@ -17,6 +17,15 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
+const (
+	resyncInterval = 5 * time.Minute
+	retryDelay     = 5 * time.Second
+)
+
+func cacheKey(namespace, name string) string {
+	return fmt.Sprintf("%s/%s", namespace, name)
+}
+
 type SecretProviderClassCache struct {
 	mu      sync.RWMutex
 	objects map[string]*unstructured.Unstructured
@@ -31,15 +40,13 @@ func NewCache() *SecretProviderClassCache {
 func (c *SecretProviderClassCache) Set(namespace, name string, obj *unstructured.Unstructured) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := fmt.Sprintf("%s/%s", namespace, name)
-	c.objects[key] = obj
+	c.objects[cacheKey(namespace, name)] = obj
 }
 
 func (c *SecretProviderClassCache) Delete(namespace, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	key := fmt.Sprintf("%s/%s", namespace, name)
-	delete(c.objects, key)
+	delete(c.objects, cacheKey(namespace, name))
 }
 
 func (c *SecretProviderClassCache) List() []*unstructured.Unstructured {
@@ -50,6 +57,111 @@ func (c *SecretProviderClassCache) List() []*unstructured.Unstructured {
 		result = append(result, obj)
 	}
 	return result
+}
+
+type Controller struct {
+	client dynamic.Interface
+	cache  *SecretProviderClassCache
+	gvr    schema.GroupVersionResource
+	ctx    context.Context
+}
+
+func NewController(client dynamic.Interface) *Controller {
+	return &Controller{
+		client: client,
+		cache:  NewCache(),
+		gvr: schema.GroupVersionResource{
+			Group:    "secrets-store.csi.x-k8s.io",
+			Version:  "v1",
+			Resource: "secretproviderclasses",
+		},
+		ctx: context.Background(),
+	}
+}
+
+func (ctrl *Controller) printCache() {
+	objects := ctrl.cache.List()
+	fmt.Printf("\n--- Current SecretProviderClass objects: %d ---\n", len(objects))
+	for _, obj := range objects {
+		fmt.Printf("  %s/%s\n", obj.GetNamespace(), obj.GetName())
+	}
+	fmt.Println("---")
+}
+
+func (ctrl *Controller) handleEvent(event watch.Event) {
+	obj, ok := event.Object.(*unstructured.Unstructured)
+	if !ok {
+		log.Printf("Unexpected object type: %T", event.Object)
+		return
+	}
+
+	namespace := obj.GetNamespace()
+	name := obj.GetName()
+
+	switch event.Type {
+	case watch.Added:
+		log.Printf("Event: ADDED %s/%s", namespace, name)
+		ctrl.cache.Set(namespace, name, obj.DeepCopy())
+		ctrl.printCache()
+	case watch.Modified:
+		log.Printf("Event: MODIFIED %s/%s", namespace, name)
+		ctrl.cache.Set(namespace, name, obj.DeepCopy())
+	case watch.Deleted:
+		log.Printf("Event: DELETED %s/%s", namespace, name)
+		ctrl.cache.Delete(namespace, name)
+		ctrl.printCache()
+	case watch.Error:
+		log.Printf("Event: ERROR %s/%s", namespace, name)
+	}
+}
+
+func (ctrl *Controller) syncCache() {
+	log.Println("Performing full resync")
+	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(ctrl.ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Printf("Error listing SecretProviderClasses: %v", err)
+		return
+	}
+
+	for _, item := range result.Items {
+		ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
+	}
+
+	log.Printf("Resync complete: %d objects in cache", len(result.Items))
+}
+
+func (ctrl *Controller) startPeriodicResync() {
+	ticker := time.NewTicker(resyncInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctrl.syncCache()
+	}
+}
+
+func (ctrl *Controller) Run() {
+	ctrl.syncCache()
+	ctrl.printCache()
+
+	go ctrl.startPeriodicResync()
+
+	log.Println("Watching for events...")
+
+	for {
+		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace("").Watch(ctrl.ctx, metav1.ListOptions{})
+		if err != nil {
+			log.Printf("Error creating watcher: %v", err)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		for event := range watcher.ResultChan() {
+			ctrl.handleEvent(event)
+		}
+
+		log.Println("Watch connection closed, reconnecting in 5 seconds...")
+		watcher.Stop()
+		time.Sleep(retryDelay)
+	}
 }
 
 func main() {
@@ -72,89 +184,7 @@ func main() {
 		log.Fatalf("Error creating dynamic client: %v", err)
 	}
 
-	gvr := schema.GroupVersionResource{
-		Group:    "secrets-store.csi.x-k8s.io",
-		Version:  "v1",
-		Resource: "secretproviderclasses",
-	}
-
-	cache := NewCache()
-	ctx := context.Background()
-
-	printCache := func() {
-		objects := cache.List()
-		fmt.Printf("\n--- Current SecretProviderClass objects: %d ---\n", len(objects))
-		for _, obj := range objects {
-			fmt.Printf("  %s/%s\n", obj.GetNamespace(), obj.GetName())
-		}
-		fmt.Println("---")
-	}
-
-	listAndSync := func() {
-		log.Println("Performing full resync")
-		result, err := dynamicClient.Resource(gvr).Namespace("").List(ctx, metav1.ListOptions{})
-		if err != nil {
-			log.Printf("Error listing SecretProviderClasses: %v", err)
-			return
-		}
-
-		for _, item := range result.Items {
-			cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
-		}
-
-		log.Printf("Resync complete: %d objects in cache", len(result.Items))
-	}
-
-	listAndSync()
-	printCache()
-
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			listAndSync()
-		}
-	}()
-
-	log.Println("Watching for events...")
-
-	for {
-		watcher, err := dynamicClient.Resource(gvr).Namespace("").Watch(ctx, metav1.ListOptions{})
-		if err != nil {
-			log.Printf("Error creating watcher: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		for event := range watcher.ResultChan() {
-			obj, ok := event.Object.(*unstructured.Unstructured)
-			if !ok {
-				log.Printf("Unexpected object type: %T", event.Object)
-				continue
-			}
-
-			namespace := obj.GetNamespace()
-			name := obj.GetName()
-
-			switch event.Type {
-			case watch.Added:
-				log.Printf("Event: ADDED %s/%s", namespace, name)
-				cache.Set(namespace, name, obj.DeepCopy())
-				printCache()
-			case watch.Modified:
-				log.Printf("Event: MODIFIED %s/%s", namespace, name)
-				cache.Set(namespace, name, obj.DeepCopy())
-			case watch.Deleted:
-				log.Printf("Event: DELETED %s/%s", namespace, name)
-				cache.Delete(namespace, name)
-				printCache()
-			case watch.Error:
-				log.Printf("Event: ERROR %s/%s", namespace, name)
-			}
-		}
-
-		log.Println("Watch connection closed, reconnecting in 5 seconds...")
-		watcher.Stop()
-		time.Sleep(5 * time.Second)
-	}
+	controller := NewController(dynamicClient)
+	controller.Run()
 }
+
