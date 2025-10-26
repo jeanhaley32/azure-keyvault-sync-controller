@@ -144,7 +144,71 @@ Implemented Azure AD token exchange using Azure Workload Identity federation to 
 - Service account impersonation maintained
 - No centralized credentials
 
-**Next:** Phase 3 - Azure Key Vault Integration
+**Next:** Phase 4 - SecretProviderClass Updates
+
+### Phase 3: Azure Key Vault Integration - ✅ COMPLETE
+**Branch:** `keyvault-integration`
+**PR:** #6
+
+Implemented Azure Key Vault integration to list secrets and certificates using Azure AD tokens from Phase 2.2.
+
+**New Files:**
+- `vault.go`: Key Vault client infrastructure (153 lines)
+  - CachedTokenCredential wrapper implementing azcore.TokenCredential
+  - ListSecrets() function with pagination support
+  - ListCertificates() function with pagination support
+  - ExtractKeyvaultName() helper function
+  - Filters for enabled items only (skip disabled secrets/certs)
+- `planning/keyvault-integration.md`: Comprehensive planning document (511 lines)
+  - Azure Key Vault SDK research findings
+  - Architecture decisions and token credential wrapper design
+  - Implementation approach with error handling strategy
+  - Testing strategy and success criteria
+
+**Modified Files:**
+- `azure.go`: Modified GetToken() to return expiration time
+  - Changed signature to return (string, time.Time, error)
+  - Returns both token and expiration for vault client usage
+- `controller.go`: Integrated vault operations into syncCache()
+  - Extract keyvaultName from SecretProviderClass spec
+  - Call ListSecrets() with Azure AD token and expiration
+  - Call ListCertificates() with Azure AD token and expiration
+  - Comprehensive logging of discovered vault contents
+  - Error handling continues processing on vault failures
+- `go.mod/go.sum`: Added Azure Key Vault SDK dependencies
+  - github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.4.0
+  - github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azcertificates v1.4.0
+
+**Key Features:**
+- Reuses Azure AD tokens from Phase 2.2 (no additional token acquisition)
+- Custom token credential wrapper integrates seamlessly with Azure SDK
+- Pagination support for vaults with hundreds of secrets/certificates
+- Filters enabled-only secrets and certificates automatically
+- Best-effort error handling (vault failures don't stop sync)
+- Comprehensive logging for debugging and verification
+- RBAC-aware (gracefully handles 403 Forbidden errors)
+
+**Testing Results:**
+- Successfully connected to staging vault: `staging-flow-vault.vault.azure.net`
+- Discovered 3 secrets: `azure-flow-api-secret`, `flow-api-secret`, `testing-secret`
+- Token caching verified working (28-hour Azure AD token lifetime)
+- Periodic resync working with cached tokens
+- No crashes or errors during testing
+- End-to-end authentication chain validated (K8s → Azure AD → Key Vault)
+
+**Architecture Validated:**
+- Service account impersonation: `aks-staging-flow`
+- Token reuse across multiple syncs
+- Multi-vault support ready (each SecretProviderClass targets different vault)
+- RBAC permissions verified (Key Vault Secrets User role working)
+
+**Security:**
+- Tokens remain cached from Phase 2.2 with proper lifecycle
+- No additional credential storage required
+- Vault operations use least-privilege RBAC roles
+- Audit trail maintained (vault logs show correct service identity)
+
+**Next:** Phase 4 - SecretProviderClass Updates (automatically populate objects array)
 
 ### Refactor: File Structure Organization
 **Branch:** `refactor-file-structure`

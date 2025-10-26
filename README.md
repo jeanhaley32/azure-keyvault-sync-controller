@@ -8,7 +8,7 @@ This controller watches SecretProviderClass resources and automatically updates 
 
 ## Current State
 
-**Status:** Phase 2 Complete - Token Acquisition (K8s + Azure AD) ✅
+**Status:** Phase 3 Complete - Azure Key Vault Integration ✅
 
 ### Implemented Features
 
@@ -36,6 +36,16 @@ This controller watches SecretProviderClass resources and automatically updates 
 - Service-level token scope (multi-vault support)
 - Tested with real AKS cluster and Azure federated identity
 
+**Phase 3: Azure Key Vault Integration** ✅
+- Custom token credential wrapper (CachedTokenCredential)
+- List secrets from Azure Key Vault with pagination
+- List certificates from Azure Key Vault with pagination
+- KeyvaultName extraction from SecretProviderClass spec.parameters
+- Filter disabled secrets and certificates automatically
+- Best-effort error handling (vault failures don't stop sync)
+- Comprehensive logging of discovered vault contents
+- Tested with real staging vault (staging-flow-vault)
+
 ### Token Configuration
 
 **Kubernetes Tokens:**
@@ -57,8 +67,8 @@ This controller watches SecretProviderClass resources and automatically updates 
 2. ✅ **Discover service accounts** - Identify the Kubernetes service account associated with each SecretProviderClass
 3. ✅ **Impersonate service accounts** - Use the Kubernetes TokenRequest API to obtain tokens for individual service accounts
 4. ✅ **Exchange tokens** - Trade Kubernetes tokens for Azure AD tokens via Azure Workload Identity federation (Phase 2.2)
-5. ⏳ **Query Azure Key Vault** - List all secrets and certificates in the vault using the service's existing permissions (Phase 3 - NEXT)
-6. 📋 **Update SecretProviderClass** - Automatically populate the `objects` array with discovered vault contents (Phase 4)
+5. ✅ **Query Azure Key Vault** - List all secrets and certificates in the vault using the service's existing permissions (Phase 3)
+6. ⏳ **Update SecretProviderClass** - Automatically populate the `objects` array with discovered vault contents (Phase 4 - NEXT)
 
 ## Architecture
 
@@ -189,23 +199,20 @@ The controller requires these Kubernetes permissions:
 
 ## Next Steps
 
-**Phase 2.2: Azure AD Token Exchange** (Next)
-- Implement Azure Workload Identity credential exchange
-- Trade Kubernetes JWT for Azure AD access token
-- Cache Azure tokens with refresh logic
-- Handle federated credential validation errors
-
-**Phase 3: Azure Key Vault Integration**
-- Initialize Azure Key Vault SDK client
-- List secrets and certificates from vault
-- Handle vault RBAC permissions
-- Implement pagination and error handling
-
-**Phase 4: SecretProviderClass Updates**
-- Generate objects array from vault contents
-- Patch SecretProviderClass resources
-- Handle merge strategy for existing objects
+**Phase 4: SecretProviderClass Updates** (Next)
+- Generate objects array from discovered secrets and certificates
+- Patch SecretProviderClass resources with vault contents
+- Handle merge strategy for existing manually-defined objects
 - Add last-sync timestamp annotation
+- Detect changes and update only when needed
+
+**Phase 5: Production Readiness**
+- Prometheus metrics export
+- Structured logging with log levels
+- Health check endpoints
+- Configuration management via ConfigMap
+- Security hardening (non-root, read-only filesystem)
+- Comprehensive test coverage
 
 ## License
 
