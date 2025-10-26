@@ -280,6 +280,69 @@ func (ctrl *Controller) syncCache() {
 				}
 			}
 
+			// Update SecretProviderClass with discovered objects
+			log.Printf("Updating SecretProviderClass %s/%s with discovered objects",
+				item.GetNamespace(), item.GetName())
+
+			// Parse existing objects
+			existing, err := ParseExistingObjects(&item)
+			if err != nil {
+				log.Printf("Error parsing existing objects for %s/%s: %v",
+					item.GetNamespace(), item.GetName(), err)
+				// Continue with empty existing objects
+				existing = []VaultObject{}
+			}
+
+			// Generate discovered objects (use empty slices if errors occurred)
+			discoveredSecrets := secrets
+			discoveredCerts := certificates
+			if secrets == nil {
+				discoveredSecrets = []string{}
+			}
+			if certificates == nil {
+				discoveredCerts = []string{}
+			}
+			discovered := GenerateObjectsArray(discoveredSecrets, discoveredCerts)
+
+			// Merge existing and discovered
+			merged := MergeObjects(existing, discovered)
+
+			// Format as YAML
+			newObjects, err := FormatObjectsYAML(merged)
+			if err != nil {
+				log.Printf("Error formatting objects for %s/%s: %v",
+					item.GetNamespace(), item.GetName(), err)
+				// Skip update for this resource
+			} else {
+				// Check if update needed
+				currentObjects, _, _ := unstructured.NestedString(item.Object, "spec", "parameters", "objects")
+				if !DetectChanges(currentObjects, newObjects) {
+					log.Printf("No changes detected for %s/%s, skipping update",
+						item.GetNamespace(), item.GetName())
+				} else {
+					// Patch the resource
+					timestamp := time.Now().Format(time.RFC3339)
+					err = PatchSecretProviderClass(
+						ctrl.ctx,
+						ctrl.client,
+						item.GetNamespace(),
+						item.GetName(),
+						ctrl.gvr,
+						newObjects,
+						timestamp,
+					)
+					if err != nil {
+						log.Printf("Error patching %s/%s: %v",
+							item.GetNamespace(), item.GetName(), err)
+						// Continue processing other resources
+					} else {
+						log.Printf("Successfully updated %s/%s with %d objects (%d secrets, %d certs)",
+							item.GetNamespace(), item.GetName(), len(merged),
+							len(discoveredSecrets), len(discoveredCerts))
+					}
+				}
+			}
+
 			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
 			validCount++
 		} else if isSyncEnabled(&item) {
