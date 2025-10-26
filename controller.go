@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 )
 
 const (
@@ -51,16 +52,20 @@ func isValidForSync(obj *unstructured.Unstructured) (bool, string) {
 }
 
 type Controller struct {
-	client dynamic.Interface
-	cache  *SecretProviderClassCache
-	gvr    schema.GroupVersionResource
-	ctx    context.Context
+	client     dynamic.Interface
+	clientset  kubernetes.Interface
+	cache      *SecretProviderClassCache
+	tokenCache *TokenCache
+	gvr        schema.GroupVersionResource
+	ctx        context.Context
 }
 
-func NewController(client dynamic.Interface) *Controller {
+func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Controller {
 	return &Controller{
-		client: client,
-		cache:  NewCache(),
+		client:     client,
+		clientset:  clientset,
+		cache:      NewCache(),
+		tokenCache: NewTokenCache(),
 		gvr: schema.GroupVersionResource{
 			Group:    "secrets-store.csi.x-k8s.io",
 			Version:  "v1",
@@ -181,7 +186,34 @@ func (ctrl *Controller) syncCache() {
 		if isSyncEnabled(&item) {
 			enabledCount++
 		}
-		if valid, _ := isValidForSync(&item); valid {
+		if valid, serviceAccount := isValidForSync(&item); valid {
+			// Extract clientID from spec
+			clientID, err := ExtractClientID(&item)
+			if err != nil {
+				log.Printf("Warning: %s/%s missing clientID: %v", item.GetNamespace(), item.GetName(), err)
+				continue
+			}
+
+			// Get token
+			token, err := ctrl.tokenCache.GetToken(
+				ctrl.ctx,
+				ctrl.clientset,
+				item.GetNamespace(),
+				serviceAccount,
+			)
+			if err != nil {
+				log.Printf("Error getting token for %s/%s: %v", item.GetNamespace(), item.GetName(), err)
+				continue
+			}
+
+			// Log token acquisition success
+			log.Printf("Obtained Kubernetes token for %s/%s, ready for Azure authentication with clientID: %s",
+				item.GetNamespace(), serviceAccount, clientID)
+
+			// Debug: Print token snippet for verification
+			tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
+			log.Printf("DEBUG: Token for %s/%s: %s", item.GetNamespace(), serviceAccount, tokenSnippet)
+
 			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
 			validCount++
 		} else if isSyncEnabled(&item) {
