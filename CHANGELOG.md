@@ -36,6 +36,48 @@ Started with a learning-focused approach to understand Kubernetes controller pat
 
 ## 2025-10-25
 
+### Phase 2.1: Kubernetes Token Acquisition - ✅ COMPLETE
+**Branch:** `token-acquisition`
+**PR:** #4
+
+Implemented real Kubernetes TokenRequest API integration for service account token acquisition.
+
+**New Files:**
+- `token.go`: Token cache and acquisition logic (136 lines)
+  - TokenCache with thread-safe operations
+  - Real TokenRequest API implementation
+  - Token renewal at 80% of 3600s lifetime (48 minutes)
+  - ExtractClientID() from spec.parameters.clientID
+- `deploy/rbac.yaml`: RBAC permissions including serviceaccounts/token
+- `deploy/deployment.yaml`: Deployment manifest template
+- `planning/token-acquisition.md`: Research and planning (330 lines)
+- `planning/token-acquisition-implementation.md`: Implementation guide (580 lines)
+
+**Modified Files:**
+- `controller.go`: Integrated token acquisition into syncCache()
+- `main.go`: Added kubernetes clientset initialization
+- `go.mod/go.sum`: Added k8s.io/api v0.34.1 for authentication/v1
+
+**Token Configuration:**
+- Expiration: 3600 seconds (1 hour) - Azure Workload Identity standard
+- Renewal: 80% of lifetime - matches Kubernetes kubelet behavior
+- Audience: api://AzureADTokenExchange - required by Azure federation
+
+**Testing Results:**
+- Successfully obtained real Kubernetes JWT tokens
+- Verified token format and claims (aud, sub, iss, exp)
+- Token expiration exactly 1 hour from issuance
+- Cache working with renewal logic
+- ClientID extraction from SecretProviderClass spec
+- Tested against staging AKS cluster
+
+**Security:**
+- Tokens logged as snippets only (first 5 + last 5 chars)
+- Service account impersonation (no centralized credentials)
+- RBAC permissions defined for deployment
+
+**Next:** Phase 2.2 - Azure AD Token Exchange
+
 ### Refactor: File Structure Organization
 **Branch:** `refactor-file-structure`
 **PR:** #3
@@ -90,10 +132,10 @@ Implemented opt-in filtering for controller management:
 
 ## Next Steps
 
-1. **Token Acquisition** - Implement Kubernetes TokenRequest API for service account impersonation
-2. **Azure AD Token Exchange** - Trade Kubernetes tokens for Azure AD tokens via Workload Identity federation
-3. **Azure Key Vault Integration** - List secrets and certificates from vault
-4. **SecretProviderClass Updates** - Automatically populate objects array with discovered vault contents
+1. ✅ ~~**Token Acquisition**~~ - COMPLETE (Phase 2.1)
+2. **Azure AD Token Exchange** - Trade Kubernetes tokens for Azure AD tokens via Workload Identity federation (Phase 2.2 - NEXT)
+3. **Azure Key Vault Integration** - List secrets and certificates from vault (Phase 3)
+4. **SecretProviderClass Updates** - Automatically populate objects array with discovered vault contents (Phase 4)
 
 ## Architecture
 
@@ -102,6 +144,8 @@ Implemented opt-in filtering for controller management:
 - Filter by annotations for opt-in management
 - Maintain cache of managed objects
 - Track service account associations
+- ✅ Acquire Kubernetes tokens via TokenRequest API
+- ✅ Cache tokens with automatic renewal (Phase 2.1 COMPLETE)
 
 ### Target Architecture
 ```
@@ -116,8 +160,8 @@ Controller → Impersonate ServiceAccount
 
 ## Branch Status
 
-- `main` - Stable, merged features
-- `annotation-support` - Merged to main
-- `service-account-discovery` - Merged to main
-- `refactor-file-structure` - Merged to main
-- `token-acquisition` - Created, ready for implementation
+- `main` - Stable, merged features (includes Phase 2.1)
+- `annotation-support` - Merged to main (PR #1)
+- `service-account-discovery` - Merged to main (PR #2)
+- `refactor-file-structure` - Merged to main (PR #3)
+- `token-acquisition` - Merged to main (PR #4, Phase 2.1 COMPLETE)
