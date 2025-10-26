@@ -78,6 +78,74 @@ Implemented real Kubernetes TokenRequest API integration for service account tok
 
 **Next:** Phase 2.2 - Azure AD Token Exchange
 
+## 2025-10-26
+
+### Phase 2.2: Azure AD Token Exchange - ✅ COMPLETE
+**Branch:** `azure-token-exchange`
+**PR:** #5
+
+Implemented Azure AD token exchange using Azure Workload Identity federation to trade Kubernetes JWT tokens for Azure AD access tokens.
+
+**New Files:**
+- `azure.go`: Azure AD token cache and exchange logic (186 lines)
+  - AzureTokenCache with thread-safe operations
+  - Real WorkloadIdentityCredential implementation
+  - Token renewal at 80% of token lifetime
+  - ExtractTenantID() from spec.parameters.tenantId
+  - Secure temporary file handling (0600 permissions)
+- `planning/azure-token-exchange.md`: Research and planning (577 lines)
+  - Azure Workload Identity mechanism research
+  - Token scope architecture analysis
+  - Multi-vault support strategy
+  - Security considerations
+
+**Modified Files:**
+- `controller.go`: Integrated Azure token acquisition into syncCache()
+  - Added azureTokenCache field to Controller
+  - Extract tenantID from SecretProviderClass
+  - Acquire Azure AD token after K8s token
+  - Log token snippets for verification
+- `go.mod/go.sum`: Added Azure SDK dependencies
+  - github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.0
+  - github.com/Azure/azure-sdk-for-go/sdk/azcore v1.19.1
+
+**Token Exchange Flow:**
+1. Write K8s JWT to secure temporary file (0600 permissions)
+2. Set environment variables (AZURE_FEDERATED_TOKEN_FILE, AZURE_CLIENT_ID, AZURE_TENANT_ID)
+3. Create WorkloadIdentityCredential
+4. Call GetToken with scope: https://vault.azure.net/.default
+5. Receive Azure AD access token
+6. Cache by namespace/serviceAccount
+7. Clean up temporary file
+
+**Token Configuration:**
+- Scope: https://vault.azure.net/.default (service-level, not vault-specific)
+- Expiration: 28 hours (Azure-configured lifetime)
+- Renewal: 80% of lifetime (22.4 hours)
+- Cache key: namespace/serviceAccount
+
+**Testing Results:**
+- Successfully exchanged K8s JWT for real Azure AD token
+- Tested against staging AKS cluster with real federated identity
+- Verified token format and claims
+- Token caching and renewal logic working
+- Temporary file cleanup verified
+
+**Multi-Vault Architecture:**
+- Service-level token scope allows one token to access multiple vaults
+- Each SecretProviderClass can target different vault
+- Token reused across vaults for same service account
+- Scalable to 100+ vaults efficiently
+
+**Security:**
+- Tokens logged as snippets only (first 10 + last 10 chars)
+- Temporary files with restrictive permissions (0600)
+- Automatic cleanup with defer
+- Service account impersonation maintained
+- No centralized credentials
+
+**Next:** Phase 3 - Azure Key Vault Integration
+
 ### Refactor: File Structure Organization
 **Branch:** `refactor-file-structure`
 **PR:** #3

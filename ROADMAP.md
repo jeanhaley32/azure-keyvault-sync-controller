@@ -33,9 +33,9 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 - [x] controller.go - Controller logic
 - [x] main.go - Application initialization
 
-## Phase 2: Token Acquisition (IN PROGRESS)
+## Phase 2: Token Acquisition - ✅ COMPLETE
 
-**Status:** 🔄 Phase 2.1 Complete, Phase 2.2 Next
+**Status:** ✅ Phase 2.1 Complete, Phase 2.2 Complete
 
 ### 2.1 Kubernetes Token Request API - ✅ COMPLETE
 - [x] Implement service account impersonation
@@ -53,17 +53,26 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 - Require RBAC permissions to create tokens for service accounts
 - Controller service account needs `serviceaccounts/token` create permission
 
-### 2.2 Azure Workload Identity Integration
-- [ ] Exchange Kubernetes token for Azure AD token
-- [ ] Configure OIDC federation trust
-- [ ] Handle token exchange errors
-- [ ] Token caching and refresh
+### 2.2 Azure Workload Identity Integration - ✅ COMPLETE
+- [x] Exchange Kubernetes token for Azure AD token
+- [x] Configure OIDC federation trust
+- [x] Handle token exchange errors
+- [x] Token caching and refresh
 
 **Technical Details:**
 - Audience: `api://AzureADTokenExchange`
-- Use Azure Identity SDK for Go
+- Use Azure Identity SDK for Go (`azidentity v1.13.0`)
 - Federated credential configuration required per service
-- Token refresh before expiration
+- Token refresh before expiration (80% of lifetime)
+- Scope: `https://vault.azure.net/.default` (service-level)
+- Secure temporary file handling for K8s JWT
+- WorkloadIdentityCredential for token exchange
+
+**Implementation:**
+- Created `azure.go` with AzureTokenCache
+- Integrated into controller syncCache loop
+- Tested with real AKS cluster and federated identity
+- Multi-vault support via service-level token scope
 
 ## Phase 3: Azure Key Vault Integration
 

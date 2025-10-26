@@ -8,7 +8,7 @@ This controller watches SecretProviderClass resources and automatically updates 
 
 ## Current State
 
-**Status:** Phase 2.1 Complete - Kubernetes Token Acquisition ✅
+**Status:** Phase 2 Complete - Token Acquisition (K8s + Azure AD) ✅
 
 ### Implemented Features
 
@@ -27,19 +27,37 @@ This controller watches SecretProviderClass resources and automatically updates 
 - ClientID extraction from SecretProviderClass spec.parameters
 - Tested and verified against real AKS cluster
 
+**Phase 2.2: Azure AD Token Exchange** ✅
+- WorkloadIdentityCredential integration (Azure SDK)
+- Exchange K8s JWT for Azure AD access tokens via federated identity
+- Azure AD token caching with automatic renewal (80% of lifetime)
+- TenantID extraction from SecretProviderClass spec.parameters
+- Secure temporary file handling for token exchange
+- Service-level token scope (multi-vault support)
+- Tested with real AKS cluster and Azure federated identity
+
 ### Token Configuration
+
+**Kubernetes Tokens:**
 - **Expiration:** 3600 seconds (1 hour - Azure standard)
 - **Renewal:** 80% of lifetime (48 minutes before expiry)
 - **Audience:** `api://AzureADTokenExchange`
 - **Format:** JWT with claims for Azure Workload Identity federation
+
+**Azure AD Tokens:**
+- **Expiration:** 28 hours (Azure-configured lifetime)
+- **Renewal:** 80% of lifetime (22.4 hours before expiry)
+- **Scope:** `https://vault.azure.net/.default` (service-level)
+- **Format:** JWT with claims for Azure Key Vault access
+- **Cache:** By namespace/serviceAccount (reusable across vaults)
 
 ## Implementation Progress
 
 1. ✅ **Watch SecretProviderClass resources** - Monitor all SecretProviderClass objects in the cluster
 2. ✅ **Discover service accounts** - Identify the Kubernetes service account associated with each SecretProviderClass
 3. ✅ **Impersonate service accounts** - Use the Kubernetes TokenRequest API to obtain tokens for individual service accounts
-4. ⏳ **Exchange tokens** - Trade Kubernetes tokens for Azure AD tokens via Azure Workload Identity federation (Phase 2.2)
-5. 📋 **Query Azure Key Vault** - List all secrets and certificates in the vault using the service's existing permissions (Phase 3)
+4. ✅ **Exchange tokens** - Trade Kubernetes tokens for Azure AD tokens via Azure Workload Identity federation (Phase 2.2)
+5. ⏳ **Query Azure Key Vault** - List all secrets and certificates in the vault using the service's existing permissions (Phase 3 - NEXT)
 6. 📋 **Update SecretProviderClass** - Automatically populate the `objects` array with discovered vault contents (Phase 4)
 
 ## Architecture
