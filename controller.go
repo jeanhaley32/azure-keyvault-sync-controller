@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
@@ -52,20 +52,22 @@ func isValidForSync(obj *unstructured.Unstructured) (bool, string) {
 }
 
 type Controller struct {
-	client     dynamic.Interface
-	clientset  kubernetes.Interface
-	cache      *SecretProviderClassCache
-	tokenCache *TokenCache
-	gvr        schema.GroupVersionResource
-	ctx        context.Context
+	client          dynamic.Interface
+	clientset       kubernetes.Interface
+	cache           *SecretProviderClassCache
+	tokenCache      *TokenCache
+	azureTokenCache *AzureTokenCache
+	gvr             schema.GroupVersionResource
+	ctx             context.Context
 }
 
 func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Controller {
 	return &Controller{
-		client:     client,
-		clientset:  clientset,
-		cache:      NewCache(),
-		tokenCache: NewTokenCache(),
+		client:          client,
+		clientset:       clientset,
+		cache:           NewCache(),
+		tokenCache:      NewTokenCache(),
+		azureTokenCache: NewAzureTokenCache(),
 		gvr: schema.GroupVersionResource{
 			Group:    "secrets-store.csi.x-k8s.io",
 			Version:  "v1",
@@ -212,7 +214,36 @@ func (ctrl *Controller) syncCache() {
 
 			// Debug: Print token snippet for verification
 			tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
-			log.Printf("DEBUG: Token for %s/%s: %s", item.GetNamespace(), serviceAccount, tokenSnippet)
+			log.Printf("DEBUG: K8s token for %s/%s: %s", item.GetNamespace(), serviceAccount, tokenSnippet)
+
+			// Extract tenantID from spec
+			tenantID, err := ExtractTenantID(&item)
+			if err != nil {
+				log.Printf("Warning: %s/%s missing tenantID: %v", item.GetNamespace(), item.GetName(), err)
+				continue
+			}
+
+			// Get Azure AD token
+			azureToken, err := ctrl.azureTokenCache.GetToken(
+				ctrl.ctx,
+				item.GetNamespace(),
+				serviceAccount,
+				token,
+				clientID,
+				tenantID,
+			)
+			if err != nil {
+				log.Printf("Error getting Azure AD token for %s/%s: %v", item.GetNamespace(), item.GetName(), err)
+				continue
+			}
+
+			// Log Azure AD token acquisition success
+			log.Printf("Obtained Azure AD token for %s/%s, ready for Key Vault access",
+				item.GetNamespace(), serviceAccount)
+
+			// Debug: Print Azure token snippet for verification
+			azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
+			log.Printf("DEBUG: Azure AD token for %s/%s: %s", item.GetNamespace(), serviceAccount, azureTokenSnippet)
 
 			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
 			validCount++
