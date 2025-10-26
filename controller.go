@@ -97,6 +97,14 @@ func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
 	if enabled {
 		if hasServiceAccount {
 			log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s)", namespace, name, serviceAccount)
+
+			// Immediate reconciliation
+			err := ctrl.reconcileResource(obj)
+			if err != nil {
+				log.Printf("Error reconciling %s/%s: %v", namespace, name, err)
+				// Still add to cache even if reconciliation fails
+			}
+
 			ctrl.cache.Set(namespace, name, obj.DeepCopy())
 			ctrl.printCache()
 		} else {
@@ -117,6 +125,13 @@ func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
 	if enabled && !inCache {
 		if hasServiceAccount {
 			log.Printf("Event: MODIFIED %s/%s (annotation enabled, service-account: %s, adding to cache)", namespace, name, serviceAccount)
+
+			// Immediate reconciliation
+			err := ctrl.reconcileResource(obj)
+			if err != nil {
+				log.Printf("Error reconciling %s/%s: %v", namespace, name, err)
+			}
+
 			ctrl.cache.Set(namespace, name, obj.DeepCopy())
 			ctrl.printCache()
 		} else {
@@ -129,6 +144,13 @@ func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
 	} else if enabled && inCache {
 		if hasServiceAccount {
 			log.Printf("Event: MODIFIED %s/%s (updating, service-account: %s)", namespace, name, serviceAccount)
+
+			// Immediate reconciliation - THIS FIXES ANNOTATION REMOVAL TEST
+			err := ctrl.reconcileResource(obj)
+			if err != nil {
+				log.Printf("Error reconciling %s/%s: %v", namespace, name, err)
+			}
+
 			ctrl.cache.Set(namespace, name, obj.DeepCopy())
 		} else {
 			log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache)", namespace, name)
@@ -176,6 +198,189 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 	}
 }
 
+// reconcileResource performs vault discovery and SecretProviderClass update for a single resource
+func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error {
+	namespace := obj.GetNamespace()
+	name := obj.GetName()
+
+	// Get service account
+	serviceAccount, hasServiceAccount := getServiceAccount(obj)
+	if !hasServiceAccount {
+		return fmt.Errorf("missing service-account annotation")
+	}
+
+	// Extract clientID from spec
+	clientID, err := ExtractClientID(obj)
+	if err != nil {
+		return fmt.Errorf("missing clientID: %w", err)
+	}
+
+	// Get Kubernetes token
+	token, err := ctrl.tokenCache.GetToken(
+		ctrl.ctx,
+		ctrl.clientset,
+		namespace,
+		serviceAccount,
+	)
+	if err != nil {
+		return fmt.Errorf("error getting token: %w", err)
+	}
+
+	log.Printf("Obtained Kubernetes token for %s/%s, ready for Azure authentication with clientID: %s",
+		namespace, serviceAccount, clientID)
+
+	// Debug: Print token snippet
+	tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
+	log.Printf("DEBUG: K8s token for %s/%s: %s", namespace, serviceAccount, tokenSnippet)
+
+	// Extract tenantID
+	tenantID, err := ExtractTenantID(obj)
+	if err != nil {
+		return fmt.Errorf("missing tenantID: %w", err)
+	}
+
+	// Get Azure AD token
+	azureToken, azureTokenExpiration, err := ctrl.azureTokenCache.GetToken(
+		ctrl.ctx,
+		namespace,
+		serviceAccount,
+		token,
+		clientID,
+		tenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("error getting Azure AD token: %w", err)
+	}
+
+	log.Printf("Obtained Azure AD token for %s/%s, ready for Key Vault access",
+		namespace, serviceAccount)
+
+	// Debug: Print Azure token snippet
+	azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
+	log.Printf("DEBUG: Azure AD token for %s/%s: %s", namespace, serviceAccount, azureTokenSnippet)
+
+	// Extract vault name
+	keyvaultName, err := ExtractKeyvaultName(obj)
+	if err != nil {
+		return fmt.Errorf("missing keyvaultName: %w", err)
+	}
+
+	// List secrets from vault
+	secrets, err := ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+	if err != nil {
+		log.Printf("Error listing secrets from vault %s for %s/%s: %v",
+			keyvaultName, namespace, name, err)
+		// Continue with empty secrets slice
+		secrets = nil
+	} else {
+		log.Printf("Found %d secrets in vault %s for %s/%s",
+			len(secrets), keyvaultName, namespace, name)
+		for _, secret := range secrets {
+			log.Printf("  - Secret: %s", secret)
+		}
+	}
+
+	// List certificates from vault
+	certificates, err := ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+	if err != nil {
+		log.Printf("Error listing certificates from vault %s for %s/%s: %v",
+			keyvaultName, namespace, name, err)
+		// Continue with empty certificates slice
+		certificates = nil
+	} else {
+		log.Printf("Found %d certificates in vault %s for %s/%s",
+			len(certificates), keyvaultName, namespace, name)
+		for _, cert := range certificates {
+			log.Printf("  - Certificate: %s", cert)
+		}
+	}
+
+	// Update SecretProviderClass with discovered objects
+	log.Printf("Updating SecretProviderClass %s/%s with discovered objects", namespace, name)
+
+	// Use empty slices if errors occurred
+	discoveredSecrets := secrets
+	discoveredCerts := certificates
+	if secrets == nil {
+		discoveredSecrets = []string{}
+	}
+	if certificates == nil {
+		discoveredCerts = []string{}
+	}
+
+	// Generate objects from vault (vault is source of truth)
+	discoveredObjects := GenerateObjectsFromVault(discoveredSecrets, discoveredCerts)
+
+	// Format as YAML
+	newObjects, err := FormatObjectsYAML(discoveredObjects)
+	if err != nil {
+		return fmt.Errorf("error formatting objects: %w", err)
+	}
+
+	// Process secretObjects
+	var secretObjectsToSync interface{}
+	annotations := obj.GetAnnotations()
+	enableSecretObjects := annotations != nil && annotations[annotationSecretObjects] == annotationEnabledValue
+	enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
+
+	if enableSecretObjects || enableCertObjects {
+		log.Printf("Processing secretObjects for %s/%s (secrets: %v, certs: %v)",
+			namespace, name, enableSecretObjects, enableCertObjects)
+
+		// Generate secretObjects from vault + annotations
+		generatedSecretObjects := GenerateSecretObjectsFromVault(
+			discoveredSecrets,
+			discoveredCerts,
+			enableSecretObjects,
+			enableCertObjects,
+		)
+
+		secretObjectsToSync = generatedSecretObjects
+	} else {
+		// Check if field exists and needs removal
+		existingSecretObjects, found, _ := unstructured.NestedSlice(obj.Object, "spec", "secretObjects")
+		if found && len(existingSecretObjects) > 0 {
+			secretObjectsToSync = "REMOVE_FIELD"
+			log.Printf("Annotation disabled for %s/%s, will clear secretObjects field", namespace, name)
+		}
+	}
+
+	// Check if update needed
+	currentObjects, _, _ := unstructured.NestedString(obj.Object, "spec", "parameters", "objects")
+	objectsChanged := DetectChanges(currentObjects, newObjects)
+
+	// Check if secretObjects changed
+	secretObjectsChanged := secretObjectsToSync != nil
+
+	if !objectsChanged && !secretObjectsChanged {
+		log.Printf("No changes detected for %s/%s, skipping update", namespace, name)
+		return nil
+	}
+
+	// Patch the resource
+	timestamp := time.Now().Format(time.RFC3339)
+	log.Printf("Updating %s/%s (objects changed: %v, secretObjects changed: %v)",
+		namespace, name, objectsChanged, secretObjectsChanged)
+	err = PatchSecretProviderClass(
+		ctrl.ctx,
+		ctrl.client,
+		namespace,
+		name,
+		ctrl.gvr,
+		newObjects,
+		secretObjectsToSync,
+		timestamp,
+	)
+	if err != nil {
+		return fmt.Errorf("error patching: %w", err)
+	}
+
+	log.Printf("Successfully updated %s/%s with %d objects (%d secrets, %d certs)",
+		namespace, name, len(discoveredObjects), len(discoveredSecrets), len(discoveredCerts))
+
+	return nil
+}
+
 func (ctrl *Controller) syncCache() {
 	log.Println("Performing full resync")
 	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(ctrl.ctx, metav1.ListOptions{})
@@ -190,214 +395,12 @@ func (ctrl *Controller) syncCache() {
 		if isSyncEnabled(&item) {
 			enabledCount++
 		}
-		if valid, serviceAccount := isValidForSync(&item); valid {
-			// Extract clientID from spec
-			clientID, err := ExtractClientID(&item)
+		if valid, _ := isValidForSync(&item); valid {
+			// Reconcile this resource
+			err := ctrl.reconcileResource(&item)
 			if err != nil {
-				log.Printf("Warning: %s/%s missing clientID: %v", item.GetNamespace(), item.GetName(), err)
+				log.Printf("Error reconciling %s/%s: %v", item.GetNamespace(), item.GetName(), err)
 				continue
-			}
-
-			// Get token
-			token, err := ctrl.tokenCache.GetToken(
-				ctrl.ctx,
-				ctrl.clientset,
-				item.GetNamespace(),
-				serviceAccount,
-			)
-			if err != nil {
-				log.Printf("Error getting token for %s/%s: %v", item.GetNamespace(), item.GetName(), err)
-				continue
-			}
-
-			// Log token acquisition success
-			log.Printf("Obtained Kubernetes token for %s/%s, ready for Azure authentication with clientID: %s",
-				item.GetNamespace(), serviceAccount, clientID)
-
-			// Debug: Print token snippet for verification
-			tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
-			log.Printf("DEBUG: K8s token for %s/%s: %s", item.GetNamespace(), serviceAccount, tokenSnippet)
-
-			// Extract tenantID from spec
-			tenantID, err := ExtractTenantID(&item)
-			if err != nil {
-				log.Printf("Warning: %s/%s missing tenantID: %v", item.GetNamespace(), item.GetName(), err)
-				continue
-			}
-
-			// Get Azure AD token
-			azureToken, azureTokenExpiration, err := ctrl.azureTokenCache.GetToken(
-				ctrl.ctx,
-				item.GetNamespace(),
-				serviceAccount,
-				token,
-				clientID,
-				tenantID,
-			)
-			if err != nil {
-				log.Printf("Error getting Azure AD token for %s/%s: %v", item.GetNamespace(), item.GetName(), err)
-				continue
-			}
-
-			// Log Azure AD token acquisition success
-			log.Printf("Obtained Azure AD token for %s/%s, ready for Key Vault access",
-				item.GetNamespace(), serviceAccount)
-
-			// Debug: Print Azure token snippet for verification
-			azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
-			log.Printf("DEBUG: Azure AD token for %s/%s: %s", item.GetNamespace(), serviceAccount, azureTokenSnippet)
-
-			// Extract vault name
-			keyvaultName, err := ExtractKeyvaultName(&item)
-			if err != nil {
-				log.Printf("Warning: %s/%s missing keyvaultName: %v", item.GetNamespace(), item.GetName(), err)
-				continue
-			}
-
-			// List secrets from vault
-			secrets, err := ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
-			if err != nil {
-				log.Printf("Error listing secrets from vault %s for %s/%s: %v",
-					keyvaultName, item.GetNamespace(), item.GetName(), err)
-				// Continue processing - don't fail entire sync
-			} else {
-				log.Printf("Found %d secrets in vault %s for %s/%s",
-					len(secrets), keyvaultName, item.GetNamespace(), item.GetName())
-				for _, secret := range secrets {
-					log.Printf("  - Secret: %s", secret)
-				}
-			}
-
-			// List certificates from vault
-			certificates, err := ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
-			if err != nil {
-				log.Printf("Error listing certificates from vault %s for %s/%s: %v",
-					keyvaultName, item.GetNamespace(), item.GetName(), err)
-				// Continue processing - don't fail entire sync
-			} else {
-				log.Printf("Found %d certificates in vault %s for %s/%s",
-					len(certificates), keyvaultName, item.GetNamespace(), item.GetName())
-				for _, cert := range certificates {
-					log.Printf("  - Certificate: %s", cert)
-				}
-			}
-
-			// Update SecretProviderClass with discovered objects
-			log.Printf("Updating SecretProviderClass %s/%s with discovered objects",
-				item.GetNamespace(), item.GetName())
-
-			// Parse existing objects
-			existing, err := ParseExistingObjects(&item)
-			if err != nil {
-				log.Printf("Error parsing existing objects for %s/%s: %v",
-					item.GetNamespace(), item.GetName(), err)
-				// Continue with empty existing objects
-				existing = []VaultObject{}
-			}
-
-			// Generate discovered objects (use empty slices if errors occurred)
-			discoveredSecrets := secrets
-			discoveredCerts := certificates
-			if secrets == nil {
-				discoveredSecrets = []string{}
-			}
-			if certificates == nil {
-				discoveredCerts = []string{}
-			}
-			discovered := GenerateObjectsArray(discoveredSecrets, discoveredCerts)
-
-			// Merge existing and discovered
-			merged := MergeObjects(existing, discovered)
-
-			// Format as YAML
-			newObjects, err := FormatObjectsYAML(merged)
-			if err != nil {
-				log.Printf("Error formatting objects for %s/%s: %v",
-					item.GetNamespace(), item.GetName(), err)
-				// Skip update for this resource
-			} else {
-				// Process secretObjects if enabled
-				var secretObjectsToSync interface{}
-				annotations := item.GetAnnotations()
-				enableSecretObjects := annotations != nil && annotations[annotationSecretObjects] == annotationEnabledValue
-				enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
-
-				if enableSecretObjects || enableCertObjects {
-					log.Printf("Processing secretObjects for %s/%s (secrets: %v, certs: %v)",
-						item.GetNamespace(), item.GetName(), enableSecretObjects, enableCertObjects)
-
-					// Parse existing secretObjects
-					existingSecretObjects, err := ParseExistingSecretObjects(&item)
-					if err != nil {
-						log.Printf("Error parsing existing secretObjects for %s/%s: %v",
-							item.GetNamespace(), item.GetName(), err)
-						existingSecretObjects = []SecretObject{}
-					}
-
-					// Generate new secretObjects
-					generatedSecretObjects := GenerateSecretObjects(
-						discoveredSecrets,
-						discoveredCerts,
-						enableSecretObjects,
-						enableCertObjects,
-					)
-
-					// Merge existing and generated
-					mergedSecretObjects := MergeSecretObjects(existingSecretObjects, generatedSecretObjects)
-
-					// Format for YAML
-					secretObjectsToSync, err = FormatSecretObjectsYAML(mergedSecretObjects)
-					if err != nil {
-						log.Printf("Error formatting secretObjects for %s/%s: %v",
-							item.GetNamespace(), item.GetName(), err)
-						secretObjectsToSync = nil
-					}
-				}
-
-				// Check if update needed
-				currentObjects, _, _ := unstructured.NestedString(item.Object, "spec", "parameters", "objects")
-				objectsChanged := DetectChanges(currentObjects, newObjects)
-
-				// Check if secretObjects changed
-				secretObjectsChanged := false
-				if secretObjectsToSync != nil {
-					// Compare current secretObjects with new ones
-					existingSecretObjects, _ := ParseExistingSecretObjects(&item)
-					newSecretObjects, ok := secretObjectsToSync.([]SecretObject)
-					if ok {
-						// Simple comparison: different count or content
-						secretObjectsChanged = len(existingSecretObjects) != len(newSecretObjects)
-					}
-				}
-
-				if !objectsChanged && !secretObjectsChanged {
-					log.Printf("No changes detected for %s/%s, skipping update",
-						item.GetNamespace(), item.GetName())
-				} else {
-					// Patch the resource
-					timestamp := time.Now().Format(time.RFC3339)
-					log.Printf("Updating %s/%s (objects changed: %v, secretObjects changed: %v)",
-						item.GetNamespace(), item.GetName(), objectsChanged, secretObjectsChanged)
-					err = PatchSecretProviderClass(
-						ctrl.ctx,
-						ctrl.client,
-						item.GetNamespace(),
-						item.GetName(),
-						ctrl.gvr,
-						newObjects,
-						secretObjectsToSync,
-						timestamp,
-					)
-					if err != nil {
-						log.Printf("Error patching %s/%s: %v",
-							item.GetNamespace(), item.GetName(), err)
-						// Continue processing other resources
-					} else {
-						log.Printf("Successfully updated %s/%s with %d objects (%d secrets, %d certs)",
-							item.GetNamespace(), item.GetName(), len(merged),
-							len(discoveredSecrets), len(discoveredCerts))
-					}
-				}
 			}
 
 			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
@@ -408,6 +411,7 @@ func (ctrl *Controller) syncCache() {
 	}
 
 	log.Printf("Resync complete: %d objects in cache (%d total, %d enabled, %d valid)", validCount, len(result.Items), enabledCount, validCount)
+	ctrl.printCache()
 }
 
 func (ctrl *Controller) startPeriodicResync() {
