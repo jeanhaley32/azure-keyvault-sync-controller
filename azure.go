@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -106,39 +109,64 @@ func (ac *AzureTokenCache) IsTokenValid(namespace, serviceAccount string) bool {
 }
 
 // exchangeToken exchanges a Kubernetes JWT for an Azure AD access token
-// STUB: This is a placeholder implementation for testing
 func (ac *AzureTokenCache) exchangeToken(
 	ctx context.Context,
 	k8sToken string,
 	clientID string,
 	tenantID string,
 ) (string, time.Time, error) {
-	log.Printf("STUB: Exchanging Kubernetes token for Azure AD token")
-	log.Printf("STUB:   clientID: %s", clientID)
-	log.Printf("STUB:   tenantID: %s", tenantID)
-	log.Printf("STUB:   k8sToken: %s...%s", k8sToken[:5], k8sToken[len(k8sToken)-5:])
-	log.Printf("STUB:   scope: %s", keyVaultScope)
+	log.Printf("Exchanging Kubernetes token for Azure AD token")
 
-	// Generate fake Azure AD token
-	fakeToken := fmt.Sprintf("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.azure-ad-token-%d.signature-%d",
-		time.Now().Unix(), time.Now().Unix())
+	// Write K8s token to temporary file
+	tmpFile, err := os.CreateTemp("", "k8s-token-*.jwt")
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to create temporary token file: %w", err)
+	}
+	tmpFilePath := tmpFile.Name()
+	defer os.Remove(tmpFilePath) // Clean up temp file when done
 
-	// Azure AD tokens typically have 1 hour lifetime
-	expiration := time.Now().Add(1 * time.Hour)
+	// Set restrictive permissions (owner read/write only)
+	if err := tmpFile.Chmod(0600); err != nil {
+		tmpFile.Close()
+		return "", time.Time{}, fmt.Errorf("failed to set token file permissions: %w", err)
+	}
 
-	log.Printf("STUB: Would write K8s token to temporary file")
-	log.Printf("STUB: Would set environment variables:")
-	log.Printf("STUB:   AZURE_FEDERATED_TOKEN_FILE=/tmp/k8s-token-*.jwt")
-	log.Printf("STUB:   AZURE_CLIENT_ID=%s", clientID)
-	log.Printf("STUB:   AZURE_TENANT_ID=%s", tenantID)
-	log.Printf("STUB: Would create WorkloadIdentityCredential")
-	log.Printf("STUB: Would call GetToken with scope: %s", keyVaultScope)
-	log.Printf("STUB: Would receive Azure AD token: %s...%s",
-		fakeToken[:10], fakeToken[len(fakeToken)-10:])
-	log.Printf("STUB: Token expires at: %s", expiration.Format(time.RFC3339))
-	log.Printf("STUB: Would clean up temporary file")
+	// Write K8s token to file
+	if _, err := tmpFile.WriteString(k8sToken); err != nil {
+		tmpFile.Close()
+		return "", time.Time{}, fmt.Errorf("failed to write token to file: %w", err)
+	}
+	tmpFile.Close()
 
-	return fakeToken, expiration, nil
+	log.Printf("Created temporary token file: %s", tmpFilePath)
+
+	// Set environment variables for WorkloadIdentityCredential
+	os.Setenv("AZURE_FEDERATED_TOKEN_FILE", tmpFilePath)
+	os.Setenv("AZURE_CLIENT_ID", clientID)
+	os.Setenv("AZURE_TENANT_ID", tenantID)
+
+	log.Printf("Set environment variables for Azure authentication")
+
+	// Create WorkloadIdentityCredential
+	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to create WorkloadIdentityCredential: %w", err)
+	}
+
+	log.Printf("Created WorkloadIdentityCredential")
+
+	// Request Azure AD token with Key Vault scope
+	tokenResponse, err := cred.GetToken(ctx, policy.TokenRequestOptions{
+		Scopes: []string{keyVaultScope},
+	})
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to get Azure AD token: %w", err)
+	}
+
+	log.Printf("Successfully obtained Azure AD token, expires at %s",
+		tokenResponse.ExpiresOn.Format(time.RFC3339))
+
+	return tokenResponse.Token, tokenResponse.ExpiresOn, nil
 }
 
 // ExtractTenantID extracts the tenantId from a SecretProviderClass spec
