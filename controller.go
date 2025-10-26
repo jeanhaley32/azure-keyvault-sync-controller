@@ -224,7 +224,7 @@ func (ctrl *Controller) syncCache() {
 			}
 
 			// Get Azure AD token
-			azureToken, err := ctrl.azureTokenCache.GetToken(
+			azureToken, azureTokenExpiration, err := ctrl.azureTokenCache.GetToken(
 				ctrl.ctx,
 				item.GetNamespace(),
 				serviceAccount,
@@ -244,6 +244,41 @@ func (ctrl *Controller) syncCache() {
 			// Debug: Print Azure token snippet for verification
 			azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
 			log.Printf("DEBUG: Azure AD token for %s/%s: %s", item.GetNamespace(), serviceAccount, azureTokenSnippet)
+
+			// Extract vault name
+			keyvaultName, err := ExtractKeyvaultName(&item)
+			if err != nil {
+				log.Printf("Warning: %s/%s missing keyvaultName: %v", item.GetNamespace(), item.GetName(), err)
+				continue
+			}
+
+			// List secrets from vault
+			secrets, err := ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+			if err != nil {
+				log.Printf("Error listing secrets from vault %s for %s/%s: %v",
+					keyvaultName, item.GetNamespace(), item.GetName(), err)
+				// Continue processing - don't fail entire sync
+			} else {
+				log.Printf("Found %d secrets in vault %s for %s/%s",
+					len(secrets), keyvaultName, item.GetNamespace(), item.GetName())
+				for _, secret := range secrets {
+					log.Printf("  - Secret: %s", secret)
+				}
+			}
+
+			// List certificates from vault
+			certificates, err := ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+			if err != nil {
+				log.Printf("Error listing certificates from vault %s for %s/%s: %v",
+					keyvaultName, item.GetNamespace(), item.GetName(), err)
+				// Continue processing - don't fail entire sync
+			} else {
+				log.Printf("Found %d certificates in vault %s for %s/%s",
+					len(certificates), keyvaultName, item.GetNamespace(), item.GetName())
+				for _, cert := range certificates {
+					log.Printf("  - Certificate: %s", cert)
+				}
+			}
 
 			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
 			validCount++

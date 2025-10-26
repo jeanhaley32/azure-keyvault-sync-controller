@@ -41,7 +41,7 @@ func NewAzureTokenCache() *AzureTokenCache {
 	}
 }
 
-// GetToken returns a valid Azure AD token, acquiring a new one if necessary
+// GetToken returns a valid Azure AD token and its expiration time, acquiring a new one if necessary
 func (ac *AzureTokenCache) GetToken(
 	ctx context.Context,
 	namespace string,
@@ -49,16 +49,17 @@ func (ac *AzureTokenCache) GetToken(
 	k8sToken string,
 	clientID string,
 	tenantID string,
-) (string, error) {
+) (string, time.Time, error) {
 	key := fmt.Sprintf("%s/%s", namespace, serviceAccount)
 
 	// Check if we have a valid cached token
 	if ac.IsTokenValid(namespace, serviceAccount) {
 		ac.mu.RLock()
 		token := ac.tokens[key].Token
+		expiration := ac.tokens[key].ExpirationTime
 		ac.mu.RUnlock()
 		log.Printf("Using cached Azure AD token for %s", key)
-		return token, nil
+		return token, expiration, nil
 	}
 
 	// Need to acquire new token
@@ -67,7 +68,7 @@ func (ac *AzureTokenCache) GetToken(
 
 	token, expiration, err := ac.exchangeToken(ctx, k8sToken, clientID, tenantID)
 	if err != nil {
-		return "", fmt.Errorf("failed to exchange token for %s: %w", key, err)
+		return "", time.Time{}, fmt.Errorf("failed to exchange token for %s: %w", key, err)
 	}
 
 	// Cache the new token
@@ -85,7 +86,7 @@ func (ac *AzureTokenCache) GetToken(
 	log.Printf("Successfully cached Azure AD token for %s, expires at %s",
 		key, expiration.Format(time.RFC3339))
 
-	return token, nil
+	return token, expiration, nil
 }
 
 // IsTokenValid checks if a cached token exists and is still valid
