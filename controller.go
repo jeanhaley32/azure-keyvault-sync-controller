@@ -194,7 +194,7 @@ func (ctrl *Controller) syncCache() {
 				continue
 			}
 
-			// Get token (stubbed)
+			// Get token
 			token, err := ctrl.tokenCache.GetToken(
 				ctrl.ctx,
 				ctrl.clientset,
@@ -206,8 +206,13 @@ func (ctrl *Controller) syncCache() {
 				continue
 			}
 
-			// Log what we would do with the token
-			log.Printf("STUB: Would authenticate to Azure with clientID: %s using token: %s", clientID, token[:20]+"...")
+			// Log token acquisition success
+			log.Printf("Obtained Kubernetes token for %s/%s, ready for Azure authentication with clientID: %s",
+				item.GetNamespace(), serviceAccount, clientID)
+
+			// Debug: Print token snippet for verification
+			tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
+			log.Printf("DEBUG: Token for %s/%s: %s", item.GetNamespace(), serviceAccount, tokenSnippet)
 
 			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
 			validCount++

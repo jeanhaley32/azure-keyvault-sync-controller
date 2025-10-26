@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 )
@@ -43,19 +45,32 @@ func tokenCacheKey(namespace, serviceAccount string) string {
 	return fmt.Sprintf("%s/%s", namespace, serviceAccount)
 }
 
-// requestToken is a STUBBED function that logs token request behavior
+// requestToken requests a token from Kubernetes for the specified service account
 func (tc *TokenCache) requestToken(ctx context.Context, clientset kubernetes.Interface, namespace, serviceAccount string) (string, time.Time, error) {
-	log.Printf("STUB: Would request token for serviceaccount %s/%s", namespace, serviceAccount)
-	log.Printf("STUB: TokenRequest would have audience=%s, expirationSeconds=%d", tokenAudience, tokenExpirationSeconds)
+	log.Printf("Requesting token for serviceaccount %s/%s", namespace, serviceAccount)
 
-	// Create fake token
-	stubToken := fmt.Sprintf("stub-token-%s-%s-%d", namespace, serviceAccount, time.Now().Unix())
-	stubExpiration := time.Now().Add(time.Duration(tokenExpirationSeconds) * time.Second)
+	// Create TokenRequest
+	expirationSeconds := int64(tokenExpirationSeconds)
+	tokenRequest := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			Audiences:         []string{tokenAudience},
+			ExpirationSeconds: &expirationSeconds,
+		},
+	}
 
-	log.Printf("STUB: Generated fake token: %s", stubToken)
-	log.Printf("STUB: Fake expiration: %s", stubExpiration.Format(time.RFC3339))
+	// Call Kubernetes API
+	result, err := clientset.CoreV1().
+		ServiceAccounts(namespace).
+		CreateToken(ctx, serviceAccount, tokenRequest, metav1.CreateOptions{})
 
-	return stubToken, stubExpiration, nil
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to request token: %w", err)
+	}
+
+	log.Printf("Successfully obtained token for %s/%s, expires at %s",
+		namespace, serviceAccount, result.Status.ExpirationTimestamp.Time.Format(time.RFC3339))
+
+	return result.Status.Token, result.Status.ExpirationTimestamp.Time, nil
 }
 
 // IsTokenValid checks if token exists and hasn't reached renewal threshold
@@ -87,7 +102,7 @@ func (tc *TokenCache) GetToken(ctx context.Context, clientset kubernetes.Interfa
 		return token, nil
 	}
 
-	// Request new token (stubbed)
+	// Request new token
 	token, expiration, err := tc.requestToken(ctx, clientset, namespace, serviceAccount)
 	if err != nil {
 		return "", err
