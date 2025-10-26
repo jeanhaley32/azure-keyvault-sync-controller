@@ -20,6 +20,8 @@ const (
 
 	annotationEnabled        = "azure-keyvault-sync/enabled"
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
+	annotationSecretObjects  = "azure-keyvault-sync/secret-objects"
+	annotationCertObjects    = "azure-keyvault-sync/cert-objects"
 	annotationEnabledValue   = "true"
 )
 
@@ -314,14 +316,68 @@ func (ctrl *Controller) syncCache() {
 					item.GetNamespace(), item.GetName(), err)
 				// Skip update for this resource
 			} else {
+				// Process secretObjects if enabled
+				var secretObjectsToSync interface{}
+				annotations := item.GetAnnotations()
+				enableSecretObjects := annotations != nil && annotations[annotationSecretObjects] == annotationEnabledValue
+				enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
+
+				if enableSecretObjects || enableCertObjects {
+					log.Printf("Processing secretObjects for %s/%s (secrets: %v, certs: %v)",
+						item.GetNamespace(), item.GetName(), enableSecretObjects, enableCertObjects)
+
+					// Parse existing secretObjects
+					existingSecretObjects, err := ParseExistingSecretObjects(&item)
+					if err != nil {
+						log.Printf("Error parsing existing secretObjects for %s/%s: %v",
+							item.GetNamespace(), item.GetName(), err)
+						existingSecretObjects = []SecretObject{}
+					}
+
+					// Generate new secretObjects
+					generatedSecretObjects := GenerateSecretObjects(
+						discoveredSecrets,
+						discoveredCerts,
+						enableSecretObjects,
+						enableCertObjects,
+					)
+
+					// Merge existing and generated
+					mergedSecretObjects := MergeSecretObjects(existingSecretObjects, generatedSecretObjects)
+
+					// Format for YAML
+					secretObjectsToSync, err = FormatSecretObjectsYAML(mergedSecretObjects)
+					if err != nil {
+						log.Printf("Error formatting secretObjects for %s/%s: %v",
+							item.GetNamespace(), item.GetName(), err)
+						secretObjectsToSync = nil
+					}
+				}
+
 				// Check if update needed
 				currentObjects, _, _ := unstructured.NestedString(item.Object, "spec", "parameters", "objects")
-				if !DetectChanges(currentObjects, newObjects) {
+				objectsChanged := DetectChanges(currentObjects, newObjects)
+
+				// Check if secretObjects changed
+				secretObjectsChanged := false
+				if secretObjectsToSync != nil {
+					// Compare current secretObjects with new ones
+					existingSecretObjects, _ := ParseExistingSecretObjects(&item)
+					newSecretObjects, ok := secretObjectsToSync.([]SecretObject)
+					if ok {
+						// Simple comparison: different count or content
+						secretObjectsChanged = len(existingSecretObjects) != len(newSecretObjects)
+					}
+				}
+
+				if !objectsChanged && !secretObjectsChanged {
 					log.Printf("No changes detected for %s/%s, skipping update",
 						item.GetNamespace(), item.GetName())
 				} else {
 					// Patch the resource
 					timestamp := time.Now().Format(time.RFC3339)
+					log.Printf("Updating %s/%s (objects changed: %v, secretObjects changed: %v)",
+						item.GetNamespace(), item.GetName(), objectsChanged, secretObjectsChanged)
 					err = PatchSecretProviderClass(
 						ctrl.ctx,
 						ctrl.client,
@@ -329,6 +385,7 @@ func (ctrl *Controller) syncCache() {
 						item.GetName(),
 						ctrl.gvr,
 						newObjects,
+						secretObjectsToSync,
 						timestamp,
 					)
 					if err != nil {

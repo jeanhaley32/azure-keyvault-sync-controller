@@ -619,3 +619,307 @@ spec:
 - Real SecretProviderClass testing: 1 hour
 
 **Total**: 4-6 hours for complete Phase 4 implementation and testing
+
+---
+
+## Phase 4.1: Automatic secretObjects Generation
+
+### Overview
+
+Add functionality to automatically populate the `secretObjects` field in SecretProviderClass, which instructs the CSI driver to create Kubernetes Secret resources from vault secrets and certificates.
+
+### New Annotations
+
+1. **`azure-keyvault-sync/secret-objects: "true"`**
+   - Enables automatic Kubernetes Secret creation for vault secrets
+   - Each vault secret becomes a Kubernetes Secret (type: Opaque)
+
+2. **`azure-keyvault-sync/cert-objects: "true"`**
+   - Enables automatic Kubernetes Secret creation for vault certificates
+   - Each vault certificate becomes a Kubernetes TLS Secret (type: kubernetes.io/tls)
+
+### secretObjects Structure
+
+**For Secrets (type: Opaque):**
+```yaml
+secretObjects:
+  - secretName: flow-api-secret
+    type: Opaque
+    data:
+      - key: flow-api-secret
+        objectName: flow-api-secret
+```
+
+**For Certificates (type: kubernetes.io/tls):**
+```yaml
+secretObjects:
+  - secretName: my-cert
+    type: kubernetes.io/tls
+    data:
+      - key: tls.key
+        objectName: my-cert
+      - key: tls.crt
+        objectName: my-cert
+```
+
+### Key Mapping Strategy
+
+**For Secrets (Opaque):**
+- `secretName`: same as vault secret name
+- `key`: same as vault secret name  
+- `objectName`: same as vault secret name
+
+**For Certificates (TLS):**
+- `secretName`: same as vault cert name
+- `keys`: `tls.key` and `tls.crt` (Kubernetes TLS secret standard)
+- `objectName`: same as vault cert name (referenced twice for key and cert)
+
+### Implementation Plan
+
+#### 1. Add New Structs to update.go
+
+```go
+type SecretObject struct {
+    SecretName string              `yaml:"secretName"`
+    Type       string              `yaml:"type"`
+    Data       []SecretObjectData  `yaml:"data"`
+}
+
+type SecretObjectData struct {
+    Key        string `yaml:"key"`
+    ObjectName string `yaml:"objectName"`
+}
+```
+
+#### 2. Add New Functions to update.go
+
+**ParseExistingSecretObjects(obj *unstructured.Unstructured) ([]SecretObject, error)**
+- Extract `spec.secretObjects` array
+- Parse YAML to SecretObject structs
+- Handle missing/empty field (return empty slice)
+- Return parsed slice or error
+
+**GenerateSecretObjects(secrets []string, certs []string, enableSecrets bool, enableCerts bool) []SecretObject**
+- Create empty slice
+- If enableSecrets: for each secret, create Opaque SecretObject with single data entry
+- If enableCerts: for each cert, create TLS SecretObject with tls.key and tls.crt entries
+- Return combined slice
+
+**MergeSecretObjects(existing []SecretObject, generated []SecretObject) []SecretObject**
+- Use secretName as unique key
+- Add existing secretObjects to map
+- Add generated secretObjects if not already present (preserve manual ones)
+- Convert map to sorted slice
+- Return merged slice
+
+**FormatSecretObjectsYAML(objects []SecretObject) (interface{}, error)**
+- If empty, return nil (omit field entirely)
+- Return objects slice for YAML marshaling
+- Let YAML marshaler handle formatting
+
+#### 3. Modify PatchSecretProviderClass Function
+
+Update signature to accept optional secretObjects:
+```go
+func PatchSecretProviderClass(
+    ctx context.Context,
+    client dynamic.Interface,
+    namespace string,
+    name string,
+    gvr schema.GroupVersionResource,
+    objectsYAML string,
+    secretObjects interface{},  // NEW: can be nil or []SecretObject
+    timestamp string,
+) error
+```
+
+Add secretObjects to patch operations if not nil:
+```go
+patch := []map[string]interface{}{
+    {
+        "op":    "replace",
+        "path":  "/spec/parameters/objects",
+        "value": objectsYAML,
+    },
+    {
+        "op":    "add",
+        "path":  "/metadata/annotations/azure-keyvault-sync~1last-sync",
+        "value": timestamp,
+    },
+}
+
+// Add secretObjects patch if provided
+if secretObjects != nil {
+    patch = append(patch, map[string]interface{}{
+        "op":    "replace",
+        "path":  "/spec/secretObjects",
+        "value": secretObjects,
+    })
+}
+```
+
+#### 4. Integrate into controller.go
+
+Add after objects update logic:
+
+```go
+// Check if secretObjects sync enabled
+secretObjectsEnabled := false
+certObjectsEnabled := false
+
+if annotations := item.GetAnnotations(); annotations != nil {
+    secretObjectsEnabled = annotations["azure-keyvault-sync/secret-objects"] == "true"
+    certObjectsEnabled = annotations["azure-keyvault-sync/cert-objects"] == "true"
+}
+
+var secretObjectsToUpdate interface{} = nil
+
+if secretObjectsEnabled || certObjectsEnabled {
+    log.Printf("SecretObjects sync enabled for %s/%s (secrets=%v, certs=%v)",
+        item.GetNamespace(), item.GetName(), secretObjectsEnabled, certObjectsEnabled)
+    
+    // Parse existing secretObjects
+    existingSecretObjects, err := ParseExistingSecretObjects(&item)
+    if err != nil {
+        log.Printf("Error parsing existing secretObjects: %v", err)
+        existingSecretObjects = []SecretObject{}
+    }
+    
+    // Generate secretObjects
+    generatedSecretObjects := GenerateSecretObjects(
+        discoveredSecrets,
+        discoveredCerts,
+        secretObjectsEnabled,
+        certObjectsEnabled,
+    )
+    
+    // Merge
+    mergedSecretObjects := MergeSecretObjects(existingSecretObjects, generatedSecretObjects)
+    
+    // Format for YAML
+    secretObjectsToUpdate, err = FormatSecretObjectsYAML(mergedSecretObjects)
+    if err != nil {
+        log.Printf("Error formatting secretObjects: %v", err)
+        secretObjectsToUpdate = nil
+    } else {
+        log.Printf("Generated %d secretObjects for %s/%s",
+            len(mergedSecretObjects), item.GetNamespace(), item.GetName())
+    }
+}
+
+// Update call to include secretObjects
+err = PatchSecretProviderClass(
+    ctrl.ctx,
+    ctrl.client,
+    item.GetNamespace(),
+    item.GetName(),
+    ctrl.gvr,
+    newObjects,
+    secretObjectsToUpdate,  // NEW parameter
+    timestamp,
+)
+```
+
+### Example Transformation
+
+**Input:**
+```yaml
+annotations:
+  azure-keyvault-sync/enabled: "true"
+  azure-keyvault-sync/service-account: "aks-staging-flow"
+  azure-keyvault-sync/secret-objects: "true"
+  azure-keyvault-sync/cert-objects: "true"
+```
+
+**Discovered:** 3 secrets (azure-flow-api-secret, flow-api-secret, testing-secret), 0 certificates
+
+**Output:**
+```yaml
+spec:
+  parameters:
+    objects: |
+      array:
+        - objectName: azure-flow-api-secret
+          objectType: secret
+        - objectName: flow-api-secret
+          objectType: secret
+        - objectName: testing-secret
+          objectType: secret
+  secretObjects:
+    - secretName: azure-flow-api-secret
+      type: Opaque
+      data:
+        - key: azure-flow-api-secret
+          objectName: azure-flow-api-secret
+    - secretName: flow-api-secret
+      type: Opaque
+      data:
+        - key: flow-api-secret
+          objectName: flow-api-secret
+    - secretName: testing-secret
+      type: Opaque
+      data:
+        - key: testing-secret
+          objectName: testing-secret
+```
+
+### Testing Plan
+
+1. **Add annotation to staging SecretProviderClass:**
+   ```bash
+   kubectl annotate secretproviderclass flow-staging-secrets \
+     azure-keyvault-sync/secret-objects=true -n default
+   ```
+
+2. **Restart controller and check logs:**
+   - Verify "SecretObjects sync enabled" message
+   - Check "Generated X secretObjects" message
+
+3. **Verify SecretProviderClass updated:**
+   ```bash
+   kubectl get secretproviderclass flow-staging-secrets -n default -o jsonpath='{.spec.secretObjects}' | jq .
+   ```
+
+4. **Wait for CSI driver to create Kubernetes Secrets:**
+   ```bash
+   kubectl get secrets -n default | grep flow
+   ```
+
+5. **Test certificates:**
+   - Add `azure-keyvault-sync/cert-objects: "true"` annotation
+   - Add certificate to vault
+   - Verify TLS secret created
+
+6. **Test merge behavior:**
+   - Manually add a secretObject
+   - Restart controller
+   - Verify manual secretObject preserved + discovered ones added
+
+### Success Criteria
+
+- [ ] Parse existing secretObjects from SecretProviderClass
+- [ ] Generate secretObjects for secrets when annotation enabled
+- [ ] Generate secretObjects for certificates when annotation enabled
+- [ ] Merge existing and generated secretObjects without duplicates
+- [ ] Format as proper YAML structure
+- [ ] Apply patch with secretObjects included
+- [ ] Test with secrets-only annotation
+- [ ] Test with certs-only annotation
+- [ ] Test with both annotations
+- [ ] Verify Kubernetes Secrets created by CSI driver
+- [ ] Verify manual secretObjects preserved
+
+### Estimated Complexity
+
+**Development Time:** 2-3 hours
+- New structs and parsing: 30 minutes
+- Generate functions: 1 hour
+- Merge logic: 30 minutes
+- Controller integration: 30 minutes
+- Testing and debugging: 30-60 minutes
+
+**Testing Time:** 1 hour
+- Annotation testing: 30 minutes
+- CSI driver secret verification: 30 minutes
+
+**Total:** 3-4 hours for complete implementation and testing

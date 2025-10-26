@@ -29,6 +29,19 @@ type ObjectsSpec struct {
 	Array []VaultObject `yaml:"array"`
 }
 
+// SecretObject represents a Kubernetes Secret to be created from vault contents
+type SecretObject struct {
+	SecretName string              `json:"secretName" yaml:"secretName"`
+	Type       string              `json:"type" yaml:"type"`
+	Data       []SecretObjectData  `json:"data" yaml:"data"`
+}
+
+// SecretObjectData represents the data mapping for a Kubernetes Secret
+type SecretObjectData struct {
+	Key        string `json:"key" yaml:"key"`
+	ObjectName string `json:"objectName" yaml:"objectName"`
+}
+
 // ParseExistingObjects extracts and parses current objects from SecretProviderClass
 func ParseExistingObjects(obj *unstructured.Unstructured) ([]VaultObject, error) {
 	// Get spec.parameters.objects string
@@ -162,6 +175,7 @@ func PatchSecretProviderClass(
 	name string,
 	gvr schema.GroupVersionResource,
 	objectsYAML string,
+	secretObjects interface{},
 	timestamp string,
 ) error {
 	log.Printf("Patching SecretProviderClass %s/%s", namespace, name)
@@ -179,6 +193,15 @@ func PatchSecretProviderClass(
 			"path":  "/metadata/annotations/azure-keyvault-sync~1last-sync",
 			"value": timestamp,
 		},
+	}
+
+	// Add secretObjects patch if provided
+	if secretObjects != nil {
+		patch = append(patch, map[string]interface{}{
+			"op":    "replace",
+			"path":  "/spec/secretObjects",
+			"value": secretObjects,
+		})
 	}
 
 	// Marshal patch to JSON
@@ -205,4 +228,126 @@ func PatchSecretProviderClass(
 
 	log.Printf("Successfully patched %s/%s", namespace, name)
 	return nil
+}
+
+// ParseExistingSecretObjects extracts and parses current secretObjects from SecretProviderClass
+func ParseExistingSecretObjects(obj *unstructured.Unstructured) ([]SecretObject, error) {
+	// Get spec.secretObjects array
+	secretObjectsRaw, found, err := unstructured.NestedSlice(obj.Object, "spec", "secretObjects")
+	if err != nil {
+		return nil, fmt.Errorf("error accessing spec.secretObjects: %w", err)
+	}
+
+	// If secretObjects field is empty or missing, return empty slice
+	if !found || len(secretObjectsRaw) == 0 {
+		log.Printf("No existing secretObjects found in %s/%s", obj.GetNamespace(), obj.GetName())
+		return []SecretObject{}, nil
+	}
+
+	// Convert to YAML and back to parse into our structs
+	yamlBytes, err := yaml.Marshal(secretObjectsRaw)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling secretObjects: %w", err)
+	}
+
+	var secretObjects []SecretObject
+	err = yaml.Unmarshal(yamlBytes, &secretObjects)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing existing secretObjects YAML: %w", err)
+	}
+
+	log.Printf("Parsed %d existing secretObjects from %s/%s",
+		len(secretObjects), obj.GetNamespace(), obj.GetName())
+
+	return secretObjects, nil
+}
+
+// GenerateSecretObjects creates SecretObject entries for vault secrets and certificates
+func GenerateSecretObjects(secrets []string, certs []string, enableSecrets bool, enableCerts bool) []SecretObject {
+	var secretObjects []SecretObject
+
+	// Add secrets (type: Opaque)
+	if enableSecrets {
+		for _, secretName := range secrets {
+			secretObjects = append(secretObjects, SecretObject{
+				SecretName: secretName,
+				Type:       "Opaque",
+				Data: []SecretObjectData{
+					{
+						Key:        secretName,
+						ObjectName: secretName,
+					},
+				},
+			})
+		}
+		log.Printf("Generated %d Opaque secretObjects for secrets", len(secrets))
+	}
+
+	// Add certificates (type: kubernetes.io/tls)
+	if enableCerts {
+		for _, certName := range certs {
+			secretObjects = append(secretObjects, SecretObject{
+				SecretName: certName,
+				Type:       "kubernetes.io/tls",
+				Data: []SecretObjectData{
+					{
+						Key:        "tls.key",
+						ObjectName: certName,
+					},
+					{
+						Key:        "tls.crt",
+						ObjectName: certName,
+					},
+				},
+			})
+		}
+		log.Printf("Generated %d TLS secretObjects for certificates", len(certs))
+	}
+
+	log.Printf("Generated %d total secretObjects", len(secretObjects))
+	return secretObjects
+}
+
+// MergeSecretObjects combines existing and generated secretObjects without duplicates
+func MergeSecretObjects(existing []SecretObject, generated []SecretObject) []SecretObject {
+	// Use map for deduplication (key = secretName)
+	objectMap := make(map[string]SecretObject)
+
+	// Add existing secretObjects first (they take precedence)
+	for _, obj := range existing {
+		objectMap[obj.SecretName] = obj
+	}
+
+	// Add generated secretObjects (only if not already present)
+	for _, obj := range generated {
+		if _, exists := objectMap[obj.SecretName]; !exists {
+			objectMap[obj.SecretName] = obj
+		}
+	}
+
+	// Convert map back to slice
+	var merged []SecretObject
+	for _, obj := range objectMap {
+		merged = append(merged, obj)
+	}
+
+	// Sort by secretName for consistent output
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].SecretName < merged[j].SecretName
+	})
+
+	log.Printf("Merged secretObjects: %d existing + %d generated = %d total",
+		len(existing), len(generated), len(merged))
+
+	return merged
+}
+
+// FormatSecretObjectsYAML converts SecretObject slice to format for patching
+func FormatSecretObjectsYAML(objects []SecretObject) (interface{}, error) {
+	if len(objects) == 0 {
+		return nil, nil
+	}
+
+	// Return the slice directly - it will be marshaled by the patch
+	return objects, nil
 }
