@@ -266,48 +266,34 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	// List secrets from vault
 	secrets, err := ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
 	if err != nil {
-		log.Printf("Error listing secrets from vault %s for %s/%s: %v",
-			keyvaultName, namespace, name, err)
-		// Continue with empty secrets slice
-		secrets = nil
-	} else {
-		log.Printf("Found %d secrets in vault %s for %s/%s",
-			len(secrets), keyvaultName, namespace, name)
-		for _, secret := range secrets {
-			log.Printf("  - Secret: %s", secret)
-		}
+		// Fail the reconciliation - don't continue with empty secrets
+		return fmt.Errorf("failed to list secrets from vault %s: %w", keyvaultName, err)
+	}
+
+	log.Printf("Found %d secrets in vault %s for %s/%s",
+		len(secrets), keyvaultName, namespace, name)
+	for _, secret := range secrets {
+		log.Printf("  - Secret: %s", secret)
 	}
 
 	// List certificates from vault
 	certificates, err := ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
 	if err != nil {
-		log.Printf("Error listing certificates from vault %s for %s/%s: %v",
-			keyvaultName, namespace, name, err)
-		// Continue with empty certificates slice
-		certificates = nil
-	} else {
-		log.Printf("Found %d certificates in vault %s for %s/%s",
-			len(certificates), keyvaultName, namespace, name)
-		for _, cert := range certificates {
-			log.Printf("  - Certificate: %s", cert)
-		}
+		// Fail the reconciliation - don't continue with empty certificates
+		return fmt.Errorf("failed to list certificates from vault %s: %w", keyvaultName, err)
+	}
+
+	log.Printf("Found %d certificates in vault %s for %s/%s",
+		len(certificates), keyvaultName, namespace, name)
+	for _, cert := range certificates {
+		log.Printf("  - Certificate: %s", cert)
 	}
 
 	// Update SecretProviderClass with discovered objects
 	log.Printf("Updating SecretProviderClass %s/%s with discovered objects", namespace, name)
 
-	// Use empty slices if errors occurred
-	discoveredSecrets := secrets
-	discoveredCerts := certificates
-	if secrets == nil {
-		discoveredSecrets = []string{}
-	}
-	if certificates == nil {
-		discoveredCerts = []string{}
-	}
-
 	// Generate objects from vault (vault is source of truth)
-	discoveredObjects := GenerateObjectsFromVault(discoveredSecrets, discoveredCerts)
+	discoveredObjects := GenerateObjectsFromVault(secrets, certificates)
 
 	// Format as YAML
 	newObjects, err := FormatObjectsYAML(discoveredObjects)
@@ -328,8 +314,8 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 
 		// Generate secretObjects from vault + annotations
 		generatedSecretObjects := GenerateSecretObjectsFromVault(
-			discoveredSecrets,
-			discoveredCerts,
+			secrets,
+			certificates,
 			enableSecretObjects,
 			enableCertObjects,
 		)
@@ -377,7 +363,7 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	}
 
 	log.Printf("Successfully updated %s/%s with %d objects (%d secrets, %d certs)",
-		namespace, name, len(discoveredObjects), len(discoveredSecrets), len(discoveredCerts))
+		namespace, name, len(discoveredObjects), len(secrets), len(certificates))
 
 	return nil
 }
