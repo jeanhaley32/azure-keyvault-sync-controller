@@ -9,12 +9,12 @@ import (
 var logger *slog.Logger
 
 // InitLogger initializes the global structured logger
-func InitLogger() {
-	// Get log level from environment variable (default: INFO)
-	logLevel := getLogLevel(os.Getenv("LOG_LEVEL"))
+func InitLogger(cfg *Config) {
+	// Get log level from configuration
+	logLevel := getLogLevel(cfg.LogLevel)
 
-	// Get log format from environment variable (default: text)
-	logFormat := strings.ToLower(os.Getenv("LOG_FORMAT"))
+	// Get log format from configuration
+	logFormat := strings.ToLower(cfg.LogFormat)
 
 	var handler slog.Handler
 
@@ -57,7 +57,7 @@ func getLogLevel(level string) slog.Level {
 // Logger returns the global logger instance
 func Logger() *slog.Logger {
 	if logger == nil {
-		InitLogger()
+		panic("logger not initialized - call InitLogger first")
 	}
 	return logger
 }

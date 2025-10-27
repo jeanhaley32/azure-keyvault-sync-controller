@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,10 +13,22 @@ import (
 )
 
 func main() {
-	// Initialize structured logger
-	InitLogger()
+	// Load and validate configuration
+	cfg, err := LoadConfig()
+	if err != nil {
+		// Can't use slog yet since logger isn't initialized
+		println("FATAL: Configuration error:", err.Error())
+		os.Exit(1)
+	}
+
+	// Initialize structured logger with configuration
+	InitLogger(cfg)
 
 	slog.Info("Starting Azure Key Vault Sync Controller")
+	slog.Info("Configuration loaded",
+		"syncInterval", cfg.SyncInterval,
+		"workerCount", cfg.WorkerCount,
+		"logLevel", cfg.LogLevel)
 
 	var kubeconfig string
 	if home := homedir.HomeDir(); home != "" {
@@ -43,10 +56,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	controller := NewController(dynamicClient, clientset)
+	controller := NewController(dynamicClient, clientset, cfg)
 
 	// Start health check server
-	healthAddr := ":8080"
+	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
 	slog.Info("Starting health check server", "address", healthAddr)
 	go func() {
 		if err := StartHealthCheckServer(healthAddr, controller.healthChecker); err != nil {

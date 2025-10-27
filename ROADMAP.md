@@ -187,10 +187,8 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 - [x] Health check endpoints (/healthz, /readyz)
 
 ### 5.2 Configuration Management
-- [ ] ConfigMap-based configuration
 - [ ] Environment variable overrides
 - [ ] Validation of configuration on startup
-- [ ] Hot reload for non-critical config
 
 **Configurable items:**
 - Sync interval (default: 5 minutes)

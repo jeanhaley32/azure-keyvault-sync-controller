@@ -234,15 +234,31 @@ kubectl apply -f deploy/deployment.yaml
 
 ## Configuration
 
-### Controller Constants
+### Environment Variables
 
-Current defaults (configurable in code):
+The controller can be configured via environment variables without requiring code changes:
 
-| Constant | Value | Description |
-|----------|-------|-------------|
-| `resyncInterval` | 5 minutes | Periodic resync frequency |
-| `numWorkers` | 5 | Number of concurrent workers |
-| `maxRetries` | 5 | Maximum retry attempts before dropping |
+| Variable | Default | Valid Values | Description |
+|----------|---------|--------------|-------------|
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARN`, `ERROR` | Logging verbosity level |
+| `LOG_FORMAT` | `text` | `text`, `json` | Log output format (text for dev, json for production) |
+| `SYNC_INTERVAL` | `5m` | Duration ≥ 30s | How often to resync all SecretProviderClasses |
+| `WORKER_COUNT` | `5` | 1-100 | Number of concurrent reconciliation workers |
+| `HEALTH_CHECK_PORT` | `8080` | 1-65535 | Port for health check endpoints (/healthz, /readyz) |
+
+**Example deployment.yaml configuration:**
+
+```yaml
+env:
+  - name: LOG_LEVEL
+    value: "DEBUG"
+  - name: SYNC_INTERVAL
+    value: "10m"
+  - name: WORKER_COUNT
+    value: "3"
+```
+
+The controller validates all configuration values at startup and will exit immediately with a clear error message if any values are invalid.
 
 ### Token Configuration
 
@@ -466,9 +482,9 @@ Deploy to namespaces with PSS enforcement enabled for maximum security.
 ## Next Steps
 
 **Phase 5: Production Enhancements** (Future)
-- Structured logging with log levels (info, warn, error, debug)
-- Configuration management via ConfigMap
 - Comprehensive test coverage (unit, integration, e2e)
+- GoDoc API reference documentation
+- Release process documentation
 
 ## License
 

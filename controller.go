@@ -18,10 +18,8 @@ import (
 )
 
 const (
-	resyncInterval = 5 * time.Minute
-	retryDelay     = 5 * time.Second
-	numWorkers     = 5     // Number of concurrent worker goroutines
-	maxRetries     = 5     // Maximum retry attempts before dropping
+	retryDelay = 5 * time.Second
+	maxRetries = 5 // Maximum retry attempts before dropping
 
 	annotationEnabled        = "azure-keyvault-sync/enabled"
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
@@ -85,9 +83,10 @@ type Controller struct {
 	gvr             schema.GroupVersionResource
 	ctx             context.Context
 	healthChecker   *HealthChecker
+	config          *Config
 }
 
-func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Controller {
+func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config) *Controller {
 	return &Controller{
 		client:          client,
 		clientset:       clientset,
@@ -102,6 +101,7 @@ func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Co
 		},
 		ctx:           context.Background(),
 		healthChecker: NewHealthChecker(),
+		config:        config,
 	}
 }
 
@@ -401,7 +401,7 @@ func (ctrl *Controller) syncCache() {
 }
 
 func (ctrl *Controller) startPeriodicResync() {
-	ticker := time.NewTicker(resyncInterval)
+	ticker := time.NewTicker(ctrl.config.SyncInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		ctrl.enqueueAll()
@@ -505,8 +505,8 @@ func (ctrl *Controller) Run() {
 	go ctrl.startPeriodicResync()
 
 	// Start worker pool
-	slog.Info("Starting workers", "count", numWorkers)
-	for range numWorkers {
+	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)
+	for range ctrl.config.WorkerCount {
 		go ctrl.worker()
 	}
 	ctrl.healthChecker.SetWorkersRunning(true)
