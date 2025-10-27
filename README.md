@@ -455,12 +455,12 @@ The repository includes a GitHub Actions workflow (`.github/workflows/build-and-
 ## Next Steps
 
 **Phase 5: Production Enhancements** (Future)
-- Prometheus metrics export (sync counts, error rates, queue depth)
 - Structured logging with log levels (info, warn, error, debug)
 - Health check endpoints (/healthz, /readyz)
 - Configuration management via ConfigMap
-- Security hardening (non-root, read-only filesystem, seccomp)
+- Additional security hardening (capabilities, network policies, PSS)
 - Comprehensive test coverage (unit, integration, e2e)
+- Helm chart and Kustomize manifests
 
 ## License
 

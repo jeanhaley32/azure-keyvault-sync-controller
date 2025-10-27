@@ -276,11 +276,12 @@ Repository can be forked to Kaufman Rossin's GitHub organization. GitHub Actions
 - ✅ Tested against real AKS cluster and Azure vaults
 
 ### Future Enhancements (Phase 5)
-- Prometheus metrics export (sync counts, error rates, queue depth)
-- Structured logging with log levels
+- Structured logging with log levels (info, warn, error, debug)
 - Health check endpoints (/healthz, /readyz)
 - Configuration management via ConfigMap
+- Additional security hardening (capabilities, network policies, PSS)
 - Comprehensive test coverage (unit, integration, e2e)
+- Helm chart and Kustomize manifests
 
 ---
 
