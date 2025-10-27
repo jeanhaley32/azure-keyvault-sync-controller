@@ -4,19 +4,24 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/workqueue"
 )
 
 const (
 	resyncInterval = 5 * time.Minute
 	retryDelay     = 5 * time.Second
+	numWorkers     = 5     // Number of concurrent worker goroutines
+	maxRetries     = 5     // Maximum retry attempts before dropping
 
 	annotationEnabled        = "azure-keyvault-sync/enabled"
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
@@ -24,6 +29,23 @@ const (
 	annotationCertObjects    = "azure-keyvault-sync/cert-objects"
 	annotationEnabledValue   = "true"
 )
+
+// QueueKey represents a namespaced resource name for the work queue
+type QueueKey string
+
+// keyFor creates a queue key from namespace and name
+func keyFor(namespace, name string) QueueKey {
+	return QueueKey(fmt.Sprintf("%s/%s", namespace, name))
+}
+
+// parseKey splits a queue key into namespace and name
+func parseKey(key QueueKey) (namespace, name string, err error) {
+	parts := strings.SplitN(string(key), "/", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid key format: %s", key)
+	}
+	return parts[0], parts[1], nil
+}
 
 func isSyncEnabled(obj *unstructured.Unstructured) bool {
 	annotations := obj.GetAnnotations()
@@ -59,6 +81,7 @@ type Controller struct {
 	cache           *SecretProviderClassCache
 	tokenCache      *TokenCache
 	azureTokenCache *AzureTokenCache
+	queue           workqueue.TypedRateLimitingInterface[QueueKey]
 	gvr             schema.GroupVersionResource
 	ctx             context.Context
 }
@@ -70,6 +93,7 @@ func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Co
 		cache:           NewCache(),
 		tokenCache:      NewTokenCache(),
 		azureTokenCache: NewAzureTokenCache(),
+		queue:           workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
 		gvr: schema.GroupVersionResource{
 			Group:    "secrets-store.csi.x-k8s.io",
 			Version:  "v1",
@@ -91,25 +115,15 @@ func (ctrl *Controller) printCache() {
 func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
 	namespace := obj.GetNamespace()
 	name := obj.GetName()
-	enabled := isSyncEnabled(obj)
-	serviceAccount, hasServiceAccount := getServiceAccount(obj)
 
-	if enabled {
-		if hasServiceAccount {
-			log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s)", namespace, name, serviceAccount)
+	if valid, serviceAccount := isValidForSync(obj); valid {
+		log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s) - enqueuing", namespace, name, serviceAccount)
 
-			// Immediate reconciliation
-			err := ctrl.reconcileResource(obj)
-			if err != nil {
-				log.Printf("Error reconciling %s/%s: %v", namespace, name, err)
-				// Still add to cache even if reconciliation fails
-			}
-
-			ctrl.cache.Set(namespace, name, obj.DeepCopy())
-			ctrl.printCache()
-		} else {
-			log.Printf("Event: ADDED %s/%s (sync enabled but missing service-account annotation, skipping)", namespace, name)
-		}
+		// Enqueue for reconciliation
+		key := keyFor(namespace, name)
+		ctrl.queue.Add(key)
+	} else if isSyncEnabled(obj) {
+		log.Printf("Event: ADDED %s/%s (sync enabled but missing service-account annotation, skipping)", namespace, name)
 	} else {
 		log.Printf("Event: ADDED %s/%s (sync disabled, skipping)", namespace, name)
 	}
@@ -118,45 +132,29 @@ func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
 func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
 	namespace := obj.GetNamespace()
 	name := obj.GetName()
+	key := keyFor(namespace, name)
+
 	enabled := isSyncEnabled(obj)
 	inCache := ctrl.cache.Has(namespace, name)
-	serviceAccount, hasServiceAccount := getServiceAccount(obj)
 
-	if enabled && !inCache {
+	if enabled {
+		// Resource should be synced, enqueue for reconciliation
+		_, hasServiceAccount := getServiceAccount(obj)
 		if hasServiceAccount {
-			log.Printf("Event: MODIFIED %s/%s (annotation enabled, service-account: %s, adding to cache)", namespace, name, serviceAccount)
-
-			// Immediate reconciliation
-			err := ctrl.reconcileResource(obj)
-			if err != nil {
-				log.Printf("Error reconciling %s/%s: %v", namespace, name, err)
-			}
-
-			ctrl.cache.Set(namespace, name, obj.DeepCopy())
-			ctrl.printCache()
+			log.Printf("Event: MODIFIED %s/%s (enqueuing for reconciliation)", namespace, name)
+			ctrl.queue.Add(key)
 		} else {
-			log.Printf("Event: MODIFIED %s/%s (annotation enabled but missing service-account annotation, skipping)", namespace, name)
+			log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache if present)", namespace, name)
+			if inCache {
+				ctrl.cache.Delete(namespace, name)
+				ctrl.printCache()
+			}
 		}
 	} else if !enabled && inCache {
-		log.Printf("Event: MODIFIED %s/%s (annotation disabled, removing from cache)", namespace, name)
+		// Sync disabled, remove from cache
+		log.Printf("Event: MODIFIED %s/%s (sync disabled, removing from cache)", namespace, name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
-	} else if enabled && inCache {
-		if hasServiceAccount {
-			log.Printf("Event: MODIFIED %s/%s (updating, service-account: %s)", namespace, name, serviceAccount)
-
-			// Immediate reconciliation - THIS FIXES ANNOTATION REMOVAL TEST
-			err := ctrl.reconcileResource(obj)
-			if err != nil {
-				log.Printf("Error reconciling %s/%s: %v", namespace, name, err)
-			}
-
-			ctrl.cache.Set(namespace, name, obj.DeepCopy())
-		} else {
-			log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache)", namespace, name)
-			ctrl.cache.Delete(namespace, name)
-			ctrl.printCache()
-		}
 	} else {
 		log.Printf("Event: MODIFIED %s/%s (sync disabled, skipping)", namespace, name)
 	}
@@ -381,52 +379,145 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	return nil
 }
 
-func (ctrl *Controller) syncCache() {
-	log.Println("Performing full resync")
-	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(ctrl.ctx, metav1.ListOptions{})
+// enqueueAll enqueues all valid resources for reconciliation
+func (ctrl *Controller) enqueueAll() {
+	log.Println("Periodic resync: enqueuing all tracked resources")
+
+	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(
+		ctrl.ctx, metav1.ListOptions{},
+	)
 	if err != nil {
-		log.Printf("Error listing SecretProviderClasses: %v", err)
+		log.Printf("Error listing resources for resync: %v", err)
 		return
 	}
 
-	enabledCount := 0
-	validCount := 0
+	enqueuedCount := 0
 	for _, item := range result.Items {
-		if isSyncEnabled(&item) {
-			enabledCount++
-		}
 		if valid, _ := isValidForSync(&item); valid {
-			// Reconcile this resource
-			err := ctrl.reconcileResource(&item)
-			if err != nil {
-				log.Printf("Error reconciling %s/%s: %v", item.GetNamespace(), item.GetName(), err)
-				continue
-			}
-
-			ctrl.cache.Set(item.GetNamespace(), item.GetName(), item.DeepCopy())
-			validCount++
-		} else if isSyncEnabled(&item) {
-			log.Printf("Warning: %s/%s has sync enabled but missing service-account annotation", item.GetNamespace(), item.GetName())
+			key := keyFor(item.GetNamespace(), item.GetName())
+			ctrl.queue.Add(key)
+			enqueuedCount++
 		}
 	}
 
-	log.Printf("Resync complete: %d objects in cache (%d total, %d enabled, %d valid)", validCount, len(result.Items), enabledCount, validCount)
-	ctrl.printCache()
+	log.Printf("Enqueued %d resources for periodic resync", enqueuedCount)
+}
+
+func (ctrl *Controller) syncCache() {
+	log.Println("Performing initial sync")
+	// Use enqueueAll for initial sync as well
+	ctrl.enqueueAll()
 }
 
 func (ctrl *Controller) startPeriodicResync() {
 	ticker := time.NewTicker(resyncInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		ctrl.syncCache()
+		ctrl.enqueueAll()
 	}
 }
 
+// worker processes items from the work queue
+func (ctrl *Controller) worker() {
+	for ctrl.processNextItem() {
+	}
+}
+
+// processNextItem processes a single item from the work queue
+func (ctrl *Controller) processNextItem() bool {
+	// Get next item from queue
+	key, shutdown := ctrl.queue.Get()
+	if shutdown {
+		return false
+	}
+	defer ctrl.queue.Done(key)
+
+	// Reconcile
+	err := ctrl.reconcile(key)
+
+	// Handle result with retry logic
+	ctrl.handleReconcileResult(key, err)
+
+	return true
+}
+
+// handleReconcileResult handles the result of a reconciliation with retry logic
+func (ctrl *Controller) handleReconcileResult(key QueueKey, err error) {
+	if err == nil {
+		// Success - remove from rate limiter
+		ctrl.queue.Forget(key)
+		return
+	}
+
+	// Check retry count
+	numRequeues := ctrl.queue.NumRequeues(key)
+	if numRequeues < maxRetries {
+		// Retry with exponential backoff
+		log.Printf("Error reconciling %v (attempt %d/%d), retrying: %v", key, numRequeues+1, maxRetries, err)
+		ctrl.queue.AddRateLimited(key)
+		return
+	}
+
+	// Max retries exceeded - give up
+	log.Printf("Dropping %v from queue after %d failed attempts: %v", key, maxRetries, err)
+	ctrl.queue.Forget(key)
+}
+
+// reconcile performs the actual reconciliation for a queue item
+func (ctrl *Controller) reconcile(key QueueKey) error {
+	// Parse key
+	namespace, name, err := parseKey(key)
+	if err != nil {
+		return err
+	}
+
+	// Get resource from Kubernetes
+	obj, err := ctrl.client.Resource(ctrl.gvr).Namespace(namespace).Get(
+		ctrl.ctx, name, metav1.GetOptions{},
+	)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Resource deleted, remove from cache
+			log.Printf("Resource %s/%s not found, removing from cache", namespace, name)
+			ctrl.cache.Delete(namespace, name)
+			ctrl.printCache()
+			return nil
+		}
+		return fmt.Errorf("failed to get resource: %w", err)
+	}
+
+	// Validate if resource should be synced
+	if valid, _ := isValidForSync(obj); !valid {
+		log.Printf("Resource %s/%s not valid for sync, skipping", namespace, name)
+		return nil
+	}
+
+	// Perform reconciliation
+	err = ctrl.reconcileResource(obj)
+	if err != nil {
+		return fmt.Errorf("reconciliation failed: %w", err)
+	}
+
+	// Update cache
+	ctrl.cache.Set(namespace, name, obj.DeepCopy())
+
+	return nil
+}
+
 func (ctrl *Controller) Run() {
+	defer ctrl.queue.ShutDown()
+
 	ctrl.syncCache()
 	ctrl.printCache()
 
+	// Start periodic resync
 	go ctrl.startPeriodicResync()
+
+	// Start worker pool
+	log.Printf("Starting %d workers...", numWorkers)
+	for range numWorkers {
+		go ctrl.worker()
+	}
 
 	log.Println("Watching for events...")
 
