@@ -147,8 +147,8 @@ spec:
   provider: azure
   parameters:
     keyvaultName: "staging-example-vault"
-    clientID: "aac3d546-358f-4e74-94e5-bb4c472d7cc0"
-    tenantId: "8b83ab42-3e3f-422d-85ca-fe2d40c51e35"
+    clientID: "00000000-0000-0000-0000-000000000000"
+    tenantId: "11111111-1111-1111-1111-111111111111"
     objects: ""  # Will be auto-populated by controller
 ```
 
@@ -171,8 +171,8 @@ spec:
   provider: azure
   parameters:
     keyvaultName: "staging-example-vault"
-    clientID: "aac3d546-358f-4e74-94e5-bb4c472d7cc0"
-    tenantId: "8b83ab42-3e3f-422d-85ca-fe2d40c51e35"
+    clientID: "00000000-0000-0000-0000-000000000000"
+    tenantId: "11111111-1111-1111-1111-111111111111"
     objects: ""        # Will be auto-populated
   secretObjects: []    # Will be auto-populated
 ```
