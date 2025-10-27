@@ -263,8 +263,13 @@ spec:
 | `azure-keyvault-sync/last-sync` | Auto | Timestamp of last successful sync (set by controller) |
 
 ### Vault as Source of Truth
-
 **Important:** The controller uses vault contents as the single source of truth. This means:
+
+> This design choice is based on my current usage: one vault per service, with separate accounts for each service.
+> It may be possible to add annotations within Azure's Vault secrets to enable selective secrets
+> syncing. As it stands this controller is intended to sync all of the secrets within a particular vault to
+> the target SecretProviderClass
+
 
 ✅ **Supported:**
 - Vault secrets automatically appear in `objects` array
@@ -498,10 +503,6 @@ docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:main-<sha>
 **Platform:**
 - linux/amd64
 
-### For Kaufman Rossin
-
-This repository can be forked to Kaufman Rossin's GitHub organization. The included GitHub Actions workflow can be adapted to push images to Azure Container Registry (ACR) instead of GHCR.
-
 ## Development
 
 ### Testing Locally
@@ -562,4 +563,4 @@ MIT License - See LICENSE file for details
 
 ## Contributing
 
-This is an internal tool for Kaufman Rossin. For questions or contributions, contact the DevOps team.
+Contributions are welcome! Please open an issue or pull request for any bugs, features, or improvements.
