@@ -546,18 +546,18 @@ spec:
 ## Success Criteria
 
 - [x] Research Kubernetes patching strategies
-- [ ] Parse existing objects from SecretProviderClass
-- [ ] Generate objects array from discovered secrets/certs
-- [ ] Merge existing and discovered objects without duplicates
-- [ ] Format objects as Azure provider YAML string
-- [ ] Detect changes to avoid unnecessary updates
-- [ ] Create and apply JSON Patch payload
-- [ ] Add last-sync annotation with timestamp
-- [ ] Handle errors gracefully (best-effort)
-- [ ] Test with staging SecretProviderClass
-- [ ] Verify no duplicates after multiple syncs
-- [ ] Verify manual objects preserved
-- [ ] All updates logged clearly
+- [x] Parse existing objects from SecretProviderClass
+- [x] Generate objects array from discovered secrets/certs
+- [x] ~~Merge existing and discovered objects without duplicates~~ CHANGED: Vault as source of truth (no merge)
+- [x] Format objects as Azure provider YAML string
+- [x] Detect changes to avoid unnecessary updates
+- [x] Create and apply JSON Patch payload
+- [x] Add last-sync annotation with timestamp
+- [x] Handle errors gracefully (retry logic with work queue)
+- [x] Test with staging SecretProviderClass
+- [x] ~~Verify no duplicates after multiple syncs~~ N/A: Vault as source of truth
+- [x] ~~Verify manual objects preserved~~ CHANGED: Vault as source of truth
+- [x] All updates logged clearly
 
 ## Risks and Mitigation
 
@@ -897,17 +897,17 @@ spec:
 
 ### Success Criteria
 
-- [ ] Parse existing secretObjects from SecretProviderClass
-- [ ] Generate secretObjects for secrets when annotation enabled
-- [ ] Generate secretObjects for certificates when annotation enabled
-- [ ] Merge existing and generated secretObjects without duplicates
-- [ ] Format as proper YAML structure
-- [ ] Apply patch with secretObjects included
-- [ ] Test with secrets-only annotation
-- [ ] Test with certs-only annotation
-- [ ] Test with both annotations
-- [ ] Verify Kubernetes Secrets created by CSI driver
-- [ ] Verify manual secretObjects preserved
+- [x] Parse existing secretObjects from SecretProviderClass
+- [x] Generate secretObjects for secrets when annotation enabled
+- [x] Generate secretObjects for certificates when annotation enabled
+- [x] ~~Merge existing and generated secretObjects without duplicates~~ CHANGED: Vault as source of truth
+- [x] Format as proper YAML structure
+- [x] Apply patch with secretObjects included
+- [x] Test with secrets-only annotation
+- [x] Test with certs-only annotation
+- [x] Test with both annotations
+- [x] Verify Kubernetes Secrets created by CSI driver
+- [x] ~~Verify manual secretObjects preserved~~ CHANGED: Vault as source of truth
 
 ### Estimated Complexity
 

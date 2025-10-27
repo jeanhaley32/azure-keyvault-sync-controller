@@ -769,17 +769,17 @@ func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
 - [x] Add field removal detection in controller.go
 - [x] Implement JSON Patch "remove" operation
 - [x] Update change detection logic
-- [ ] Extract reconciliation logic into reusable function
-- [ ] Add immediate reconciliation to handleAdded()
-- [ ] Add immediate reconciliation to handleModified()
-- [ ] Refactor syncCache() to use reconcileResource()
-- [ ] Test annotation removal → field cleared
-- [ ] Test vault deletion → object removed
-- [ ] Test vault addition → object added (periodic sync)
-- [ ] Test annotation toggle → clean rebuild
-- [ ] Test immediate reconciliation on ADD event
-- [ ] Test immediate reconciliation on MODIFY event
-- [ ] Update documentation with breaking changes
+- [x] Extract reconciliation logic into reusable function (reconcileResource)
+- [x] Add immediate reconciliation to handleAdded() (enqueues to work queue)
+- [x] Add immediate reconciliation to handleModified() (enqueues to work queue)
+- [x] Refactor syncCache() to use reconcileResource() (via work queue)
+- [x] Test annotation removal → field cleared (tested in staging)
+- [x] Test vault deletion → object removed (vault as source of truth)
+- [x] Test vault addition → object added (periodic sync)
+- [x] Test annotation toggle → clean rebuild
+- [x] Test immediate reconciliation on ADD event
+- [x] Test immediate reconciliation on MODIFY event
+- [x] Update documentation with breaking changes
 
 ---
 
