@@ -13,6 +13,77 @@ This controller watches SecretProviderClass resources and automatically:
 
 **Key Feature:** Vault is the single source of truth - no manual object management required.
 
+## When to Use This Controller
+
+This controller is designed for teams using the [Azure Key Vault Provider for Secrets Store CSI Driver](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-driver) who want to eliminate manual configuration management.
+
+### The Problem This Solves
+
+When using the Secrets Store CSI Driver with Azure Key Vault, you must manually maintain the `objects` array in your SecretProviderClass:
+
+```yaml
+spec:
+  parameters:
+    objects: |
+      array:
+        - objectName: "database-password"    # Must manually list every secret
+          objectType: "secret"
+        - objectName: "api-key"              # Must manually list every secret
+          objectType: "secret"
+        - objectName: "tls-cert"             # Must manually list every certificate
+          objectType: "cert"
+```
+
+**Challenges:**
+- 🔄 Must update YAML every time secrets change in vault
+- ⚠️ Easy to forget secrets, causing application failures
+- 📝 Manual synchronization between vault and Kubernetes
+- 🔁 Repetitive updates across multiple environments
+
+### The Solution
+
+This controller **automatically discovers** vault contents and keeps SecretProviderClass synchronized:
+
+```yaml
+spec:
+  parameters:
+    objects: ""  # Controller populates this automatically!
+```
+
+The controller:
+1. Authenticates to Azure Key Vault using Workload Identity
+2. Lists all enabled secrets and certificates
+3. Automatically updates the `objects` array
+4. Optionally generates `secretObjects` for Kubernetes Secrets
+
+**Result:** Your vault becomes the single source of truth. Add/remove secrets in Azure, and the controller updates Kubernetes automatically.
+
+### Prerequisites
+
+You must have the Azure Secrets Store CSI Driver infrastructure already set up:
+
+**Required Azure Documentation:**
+- [Use the Azure Key Vault Provider for Secrets Store CSI Driver in AKS](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-driver)
+- [Use Azure Workload Identity with AKS](https://learn.microsoft.com/en-us/azure/aks/workload-identity-overview)
+- [Provide an identity to access Azure Key Vault](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-identity-access)
+
+**What You Need:**
+- ✅ Secrets Store CSI Driver installed in your cluster
+- ✅ Azure Workload Identity enabled
+- ✅ Managed Identity with Key Vault permissions (Get Secrets, List Secrets, Get Certificates, List Certificates)
+- ✅ Federated Identity Credential linking Kubernetes ServiceAccount to Managed Identity
+
+**What This Controller Adds:**
+- 🤖 Automatic vault content discovery
+- 🔄 Continuous synchronization of SecretProviderClass objects
+- 🎯 Zero-touch configuration management
+
+### Related Documentation
+
+- **Azure Key Vault Provider:** https://azure.github.io/secrets-store-csi-driver-provider-azure/
+- **Secrets Store CSI Driver:** https://secrets-store-csi-driver.sigs.k8s.io/
+- **Azure Workload Identity:** https://azure.github.io/azure-workload-identity/
+
 ## Quick Start
 
 **Prerequisites:**
