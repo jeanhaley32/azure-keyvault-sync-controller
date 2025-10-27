@@ -263,8 +263,13 @@ spec:
 | `azure-keyvault-sync/last-sync` | Auto | Timestamp of last successful sync (set by controller) |
 
 ### Vault as Source of Truth
-
 **Important:** The controller uses vault contents as the single source of truth. This means:
+
+> This design choice is based on my current usage: one vault per service, with separate accounts for each service.
+> It may be possible to add annotations within Azure's Vault secrets to enable selective secrets
+> syncing. As it stands this controller is intended to sync all of the secrets within a particular vault to
+> the target SecretProviderClass
+
 
 ✅ **Supported:**
 - Vault secrets automatically appear in `objects` array
