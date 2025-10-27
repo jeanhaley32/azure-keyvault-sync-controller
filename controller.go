@@ -84,6 +84,7 @@ type Controller struct {
 	queue           workqueue.TypedRateLimitingInterface[QueueKey]
 	gvr             schema.GroupVersionResource
 	ctx             context.Context
+	healthChecker   *HealthChecker
 }
 
 func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Controller {
@@ -99,7 +100,8 @@ func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Co
 			Version:  "v1",
 			Resource: "secretproviderclasses",
 		},
-		ctx: context.Background(),
+		ctx:           context.Background(),
+		healthChecker: NewHealthChecker(),
 	}
 }
 
@@ -507,6 +509,7 @@ func (ctrl *Controller) Run() {
 	for range numWorkers {
 		go ctrl.worker()
 	}
+	ctrl.healthChecker.SetWorkersRunning(true)
 
 	log.Println("Watching for events...")
 
@@ -514,15 +517,22 @@ func (ctrl *Controller) Run() {
 		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace("").Watch(ctrl.ctx, metav1.ListOptions{})
 		if err != nil {
 			log.Printf("Error creating watcher: %v", err)
+			ctrl.healthChecker.SetWatchConnected(false)
 			time.Sleep(retryDelay)
 			continue
 		}
 
+		// Mark watch as connected
+		ctrl.healthChecker.SetWatchConnected(true)
+		log.Println("Watch connected successfully")
+
 		for event := range watcher.ResultChan() {
 			ctrl.handleEvent(event)
+			ctrl.healthChecker.UpdateWatchActivity()
 		}
 
 		log.Println("Watch connection closed, reconnecting in 5 seconds...")
+		ctrl.healthChecker.SetWatchConnected(false)
 		watcher.Stop()
 		time.Sleep(retryDelay)
 	}

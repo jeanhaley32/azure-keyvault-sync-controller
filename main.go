@@ -36,6 +36,16 @@ func main() {
 	}
 
 	controller := NewController(dynamicClient, clientset)
+
+	// Start health check server
+	healthAddr := ":8080"
+	log.Printf("Starting health check server on %s", healthAddr)
+	go func() {
+		if err := StartHealthCheckServer(healthAddr, controller.healthChecker); err != nil {
+			log.Fatalf("Health check server failed: %v", err)
+		}
+	}()
+
 	controller.Run()
 }
 
