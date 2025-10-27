@@ -1,0 +1,25 @@
+# Basic SecretProviderClass with automatic objects population
+# The controller will automatically populate the objects array with all enabled
+# secrets and certificates from the specified Azure Key Vault.
+
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: example-basic-sync
+  namespace: default
+  annotations:
+    # Enable automatic sync
+    azure-keyvault-sync/enabled: "true"
+    # ServiceAccount to impersonate for vault access
+    azure-keyvault-sync/service-account: "example-app"
+spec:
+  provider: azure
+  parameters:
+    # Azure Key Vault name
+    keyvaultName: "example-vault"
+    # Client ID of the Azure Managed Identity
+    clientID: "00000000-0000-0000-0000-000000000000"
+    # Azure AD Tenant ID
+    tenantId: "11111111-1111-1111-1111-111111111111"
+    # Objects array will be auto-populated by the controller
+    objects: ""

@@ -19,8 +19,8 @@ spec:
       serviceAccountName: azure-keyvault-sync-controller
       containers:
         - name: controller
-          image: <registry>/azure-keyvault-sync-controller:latest  # TBD
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
+          imagePullPolicy: Always
           resources:
             requests:
               memory: "64Mi"

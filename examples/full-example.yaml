@@ -1,0 +1,130 @@
+# Complete example showing all available annotations and configuration
+# This demonstrates all features of the Azure Key Vault Sync Controller.
+
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: example-full
+  namespace: default
+  annotations:
+    # REQUIRED: Enable automatic sync from Azure Key Vault
+    azure-keyvault-sync/enabled: "true"
+
+    # REQUIRED: ServiceAccount to impersonate for vault access
+    # This ServiceAccount must have:
+    # - Azure Workload Identity annotation: azure.workload.identity/client-id
+    # - Federated Identity Credential configured in Azure
+    azure-keyvault-sync/service-account: "example-app"
+
+    # OPTIONAL: Enable automatic Kubernetes Secret generation for vault secrets
+    # Creates Kubernetes Secrets of type: Opaque
+    # Secret name matches vault secret name
+    azure-keyvault-sync/secret-objects: "true"
+
+    # OPTIONAL: Enable automatic Kubernetes TLS Secret generation for vault certificates
+    # Creates Kubernetes Secrets of type: kubernetes.io/tls
+    # Contains tls.key and tls.crt from the certificate
+    azure-keyvault-sync/cert-objects: "true"
+
+    # AUTO-POPULATED: Last successful sync timestamp (set by controller)
+    # azure-keyvault-sync/last-sync: "2025-10-27T00:00:00Z"
+spec:
+  provider: azure
+  parameters:
+    # Azure Key Vault name (without .vault.azure.net suffix)
+    keyvaultName: "example-vault"
+
+    # Client ID of the Azure User-Assigned Managed Identity
+    # This identity must have:
+    # - Key Vault Secrets User role on the vault
+    # - Key Vault Certificates User role on the vault
+    clientID: "00000000-0000-0000-0000-000000000000"
+
+    # Azure AD Tenant ID where the Managed Identity exists
+    tenantId: "11111111-1111-1111-1111-111111111111"
+
+    # Objects array - AUTO-POPULATED by controller
+    # Controller discovers all enabled secrets and certificates from vault
+    # and automatically generates this array. Vault is the source of truth.
+    # Format after population:
+    # objects: |
+    #   array:
+    #     - objectName: secret-name
+    #       objectType: secret
+    #       objectVersion: ""
+    #     - objectName: cert-name
+    #       objectType: cert
+    #       objectVersion: ""
+    objects: ""
+
+  # secretObjects array - AUTO-POPULATED by controller (if annotations enabled)
+  # Controller generates Kubernetes Secret definitions based on vault contents.
+  # CSI driver uses this to automatically create Secrets in the namespace.
+  # Format after population:
+  # secretObjects:
+  #   - secretName: secret-name
+  #     type: Opaque
+  #     data:
+  #       - key: secret-name
+  #         objectName: secret-name
+  #   - secretName: cert-name
+  #     type: kubernetes.io/tls
+  #     data:
+  #       - key: tls.key
+  #         objectName: cert-name
+  #       - key: tls.crt
+  #         objectName: cert-name
+  secretObjects: []
+
+---
+# Example ServiceAccount with Azure Workload Identity annotation
+# This ServiceAccount must have a Federated Identity Credential configured in Azure
+# that trusts tokens from this Kubernetes ServiceAccount.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: example-app
+  namespace: default
+  annotations:
+    # Azure Workload Identity annotation - links to Azure Managed Identity
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+    # Optional: Specify tenant if different from cluster default
+    # azure.workload.identity/tenant-id: "11111111-1111-1111-1111-111111111111"
+
+---
+# Example Pod using the SecretProviderClass
+# The CSI driver mounts secrets into the pod's filesystem.
+# If secretObjects are configured, Kubernetes Secrets are also created.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-app
+  namespace: default
+  labels:
+    # Required for Azure Workload Identity injection
+    azure.workload.identity/use: "true"
+spec:
+  serviceAccountName: example-app
+  containers:
+    - name: app
+      image: nginx:alpine
+      volumeMounts:
+        - name: secrets-store
+          mountPath: "/mnt/secrets"
+          readOnly: true
+      env:
+        # Example: Use secret from Kubernetes Secret (if secretObjects enabled)
+        - name: SECRET_VALUE
+          valueFrom:
+            secretKeyRef:
+              name: secret-name  # Matches vault secret name
+              key: secret-name
+  volumes:
+    - name: secrets-store
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: "example-full"

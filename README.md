@@ -381,6 +381,33 @@ If `secretObjects` annotation is enabled but no Secrets created:
 3. Check pod using SecretProviderClass has volume mount
 4. Review CSI driver logs: `kubectl logs -n kube-system -l app=secrets-store-csi-driver`
 
+## Container Images
+
+### GitHub Container Registry (Public)
+
+Pre-built container images are available from GitHub Container Registry:
+
+```bash
+# Pull latest image
+docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
+
+# Pull specific version
+docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:v1.0.0
+```
+
+**Available tags:**
+- `latest` - Latest build from main branch
+- `v1.0.0`, `v1.0`, `v1` - Semantic version tags
+- `main-<sha>` - Specific commit builds
+
+**Platforms:**
+- linux/amd64
+- linux/arm64
+
+### For Kaufman Rossin
+
+This repository can be forked to Kaufman Rossin's GitHub organization. The included GitHub Actions workflow can be adapted to push images to Azure Container Registry (ACR) instead of GHCR.
+
 ## Development
 
 ### Testing Locally
@@ -390,18 +417,32 @@ If `secretObjects` annotation is enabled but no Secrets created:
 go run .
 
 # Test with specific SecretProviderClass
-kubectl apply -f examples/secretproviderclass.yaml
+kubectl apply -f examples/basic-sync.yaml
 ```
 
 ### Building
 
 ```bash
-# Build binary
+# Using Makefile (recommended)
+make build                # Build binary
+make docker-build         # Build container image
+make docker-push          # Push to registry
+make deploy               # Deploy to cluster
+
+# Manual build
 go build -o azure-keyvault-sync-controller .
 
-# Build container
+# Manual container build
 docker build -t azure-keyvault-sync-controller:latest .
 ```
+
+### CI/CD
+
+The repository includes a GitHub Actions workflow (`.github/workflows/build-and-push.yaml`) that automatically:
+- Builds multi-arch container images (amd64, arm64)
+- Pushes to GitHub Container Registry
+- Creates version tags from git tags
+- Runs on every push to main and on version tags
 
 ## Next Steps
 
