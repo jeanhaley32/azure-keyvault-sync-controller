@@ -257,10 +257,6 @@ docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
 - Distroless runtime for minimal attack surface
 - Non-root user (UID 65532)
 
-### For Kaufman Rossin
-
-Repository can be forked to Kaufman Rossin's GitHub organization. GitHub Actions workflow easily adapted for Azure Container Registry (ACR) instead of GHCR.
-
 ---
 
 ## Production Readiness

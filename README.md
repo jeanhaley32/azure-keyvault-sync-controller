@@ -503,10 +503,6 @@ docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:main-<sha>
 **Platform:**
 - linux/amd64
 
-### For Kaufman Rossin
-
-This repository can be forked to Kaufman Rossin's GitHub organization. The included GitHub Actions workflow can be adapted to push images to Azure Container Registry (ACR) instead of GHCR.
-
 ## Development
 
 ### Testing Locally
@@ -567,4 +563,4 @@ MIT License - See LICENSE file for details
 
 ## Contributing
 
-This is an internal tool for Kaufman Rossin. For questions or contributions, contact the DevOps team.
+Contributions are welcome! Please open an issue or pull request for any bugs, features, or improvements.
