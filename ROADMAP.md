@@ -232,21 +232,15 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 ### 6.1 Advanced Filtering
 - [ ] Annotation-based secret name filtering
 - [ ] Support for secret tags/labels
-- [ ] Regex patterns for secret selection
 - [ ] Exclude patterns
 
-### 6.2 Multi-Tenant Support
-- [ ] Namespace isolation
-- [ ] Per-namespace vault mapping
-- [ ] Cross-namespace secret sharing controls
-
-### 6.3 Secret Rotation Coordination
+### 6.2 Secret Rotation Coordination
 - [ ] Detect secret rotation in vault
 - [ ] Trigger pod restarts on secret changes
 - [ ] Annotation-based restart policies
 - [ ] Integration with external-secrets operator
 
-### 6.4 Backup and Recovery
+### 6.3 Backup and Recovery
 - [ ] Backup SecretProviderClass states
 - [ ] Disaster recovery procedures
 - [ ] Manual override mechanisms
