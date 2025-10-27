@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -18,10 +18,8 @@ import (
 )
 
 const (
-	resyncInterval = 5 * time.Minute
-	retryDelay     = 5 * time.Second
-	numWorkers     = 5     // Number of concurrent worker goroutines
-	maxRetries     = 5     // Maximum retry attempts before dropping
+	retryDelay = 5 * time.Second
+	maxRetries = 5 // Maximum retry attempts before dropping
 
 	annotationEnabled        = "azure-keyvault-sync/enabled"
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
@@ -85,9 +83,10 @@ type Controller struct {
 	gvr             schema.GroupVersionResource
 	ctx             context.Context
 	healthChecker   *HealthChecker
+	config          *Config
 }
 
-func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Controller {
+func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config) *Controller {
 	return &Controller{
 		client:          client,
 		clientset:       clientset,
@@ -102,6 +101,7 @@ func NewController(client dynamic.Interface, clientset kubernetes.Interface) *Co
 		},
 		ctx:           context.Background(),
 		healthChecker: NewHealthChecker(),
+		config:        config,
 	}
 }
 
@@ -119,15 +119,15 @@ func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
 	name := obj.GetName()
 
 	if valid, serviceAccount := isValidForSync(obj); valid {
-		log.Printf("Event: ADDED %s/%s (sync enabled, service-account: %s) - enqueuing", namespace, name, serviceAccount)
+		slog.Info("Event: ADDED - enqueuing", "namespace", namespace, "name", name, "serviceAccount", serviceAccount)
 
 		// Enqueue for reconciliation
 		key := keyFor(namespace, name)
 		ctrl.queue.Add(key)
 	} else if isSyncEnabled(obj) {
-		log.Printf("Event: ADDED %s/%s (sync enabled but missing service-account annotation, skipping)", namespace, name)
+		slog.Warn("Event: ADDED - missing service-account annotation", "namespace", namespace, "name", name)
 	} else {
-		log.Printf("Event: ADDED %s/%s (sync disabled, skipping)", namespace, name)
+		slog.Debug("Event: ADDED - sync disabled", "namespace", namespace, "name", name)
 	}
 }
 
@@ -143,10 +143,10 @@ func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
 		// Resource should be synced, enqueue for reconciliation
 		_, hasServiceAccount := getServiceAccount(obj)
 		if hasServiceAccount {
-			log.Printf("Event: MODIFIED %s/%s (enqueuing for reconciliation)", namespace, name)
+			slog.Info("Event: MODIFIED - enqueuing", "namespace", namespace, "name", name)
 			ctrl.queue.Add(key)
 		} else {
-			log.Printf("Event: MODIFIED %s/%s (missing service-account annotation, removing from cache if present)", namespace, name)
+			slog.Warn("Event: MODIFIED - missing service-account annotation", "namespace", namespace, "name", name)
 			if inCache {
 				ctrl.cache.Delete(namespace, name)
 				ctrl.printCache()
@@ -154,28 +154,28 @@ func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
 		}
 	} else if !enabled && inCache {
 		// Sync disabled, remove from cache
-		log.Printf("Event: MODIFIED %s/%s (sync disabled, removing from cache)", namespace, name)
+		slog.Info("Event: MODIFIED - removing from cache", "namespace", namespace, "name", name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
 	} else {
-		log.Printf("Event: MODIFIED %s/%s (sync disabled, skipping)", namespace, name)
+		slog.Debug("Event: MODIFIED - sync disabled", "namespace", namespace, "name", name)
 	}
 }
 
 func (ctrl *Controller) handleDeleted(namespace, name string, inCache bool) {
 	if inCache {
-		log.Printf("Event: DELETED %s/%s", namespace, name)
+		slog.Info("Event: DELETED", "namespace", namespace, "name", name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
 	} else {
-		log.Printf("Event: DELETED %s/%s (not in cache, skipping)", namespace, name)
+		slog.Debug("Event: DELETED - not in cache", "namespace", namespace, "name", name)
 	}
 }
 
 func (ctrl *Controller) handleEvent(event watch.Event) {
 	obj, ok := event.Object.(*unstructured.Unstructured)
 	if !ok {
-		log.Printf("Unexpected object type: %T", event.Object)
+		slog.Warn("Unexpected object type", "type", fmt.Sprintf("%T", event.Object))
 		return
 	}
 
@@ -194,7 +194,7 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 		ctrl.handleDeleted(namespace, name, inCache)
 
 	case watch.Error:
-		log.Printf("Event: ERROR %s/%s", namespace, name)
+		slog.Error("Event: ERROR", "namespace", namespace, "name", name)
 	}
 }
 
@@ -226,12 +226,12 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		return fmt.Errorf("error getting token: %w", err)
 	}
 
-	log.Printf("Obtained Kubernetes token for %s/%s, ready for Azure authentication with clientID: %s",
-		namespace, serviceAccount, clientID)
+	slog.Info("Obtained Kubernetes token",
+		    "namespace", namespace, "serviceAccount", serviceAccount, "clientID", clientID)
 
 	// Debug: Print token snippet
 	tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
-	log.Printf("DEBUG: K8s token for %s/%s: %s", namespace, serviceAccount, tokenSnippet)
+	slog.Debug("Kubernetes token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", tokenSnippet)
 
 	// Extract tenantID
 	tenantID, err := ExtractTenantID(obj)
@@ -252,12 +252,12 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		return fmt.Errorf("error getting Azure AD token: %w", err)
 	}
 
-	log.Printf("Obtained Azure AD token for %s/%s, ready for Key Vault access",
-		namespace, serviceAccount)
+	slog.Info("Obtained Azure AD token",
+		    "namespace", namespace, "serviceAccount", serviceAccount)
 
 	// Debug: Print Azure token snippet
 	azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
-	log.Printf("DEBUG: Azure AD token for %s/%s: %s", namespace, serviceAccount, azureTokenSnippet)
+	slog.Debug("Azure AD token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", azureTokenSnippet)
 
 	// Extract vault name
 	keyvaultName, err := ExtractKeyvaultName(obj)
@@ -272,10 +272,10 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		return fmt.Errorf("failed to list secrets from vault %s: %w", keyvaultName, err)
 	}
 
-	log.Printf("Found %d secrets in vault %s for %s/%s",
-		len(secrets), keyvaultName, namespace, name)
+	slog.Info("Found secrets in vault",
+		    "count", len(secrets), "vault", keyvaultName, "namespace", namespace, "name", name)
 	for _, secret := range secrets {
-		log.Printf("  - Secret: %s", secret)
+		slog.Debug("Vault secret", "name", secret)
 	}
 
 	// List certificates from vault
@@ -285,14 +285,14 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		return fmt.Errorf("failed to list certificates from vault %s: %w", keyvaultName, err)
 	}
 
-	log.Printf("Found %d certificates in vault %s for %s/%s",
-		len(certificates), keyvaultName, namespace, name)
+	slog.Info("Found certificates in vault",
+		"count", len(certificates), "vault", keyvaultName, "namespace", namespace, "name", name)
 	for _, cert := range certificates {
-		log.Printf("  - Certificate: %s", cert)
+		slog.Debug("Vault certificate", "name", cert)
 	}
 
 	// Update SecretProviderClass with discovered objects
-	log.Printf("Updating SecretProviderClass %s/%s with discovered objects", namespace, name)
+	slog.Info("Updating SecretProviderClass", "namespace", namespace, "name", name)
 
 	// Generate objects from vault (vault is source of truth)
 	discoveredObjects := GenerateObjectsFromVault(secrets, certificates)
@@ -311,8 +311,8 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
 
 	if enableSecretObjects || enableCertObjects {
-		log.Printf("Processing secretObjects for %s/%s (secrets: %v, certs: %v)",
-			namespace, name, enableSecretObjects, enableCertObjects)
+		slog.Info("Processing secretObjects",
+			"namespace", namespace, "name", name, "generateSecrets", enableSecretObjects, "generateCerts", enableCertObjects)
 
 		// Generate secretObjects from vault + annotations
 		generatedSecretObjects := GenerateSecretObjectsFromVault(
@@ -333,7 +333,7 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		if found && len(existingSecretObjects) > 0 {
 			secretObjectsToSync = "REMOVE_FIELD"
 			secretObjectsChanged = true
-			log.Printf("Annotation disabled for %s/%s, will clear secretObjects field", namespace, name)
+			slog.Info("Clearing secretObjects field", "namespace", namespace, "name", name)
 		}
 	}
 
@@ -342,14 +342,14 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	objectsChanged := DetectChanges(currentObjects, newObjects)
 
 	if !objectsChanged && !secretObjectsChanged {
-		log.Printf("No changes detected for %s/%s, skipping update", namespace, name)
+		slog.Debug("No changes detected", "namespace", namespace, "name", name)
 		return nil
 	}
 
 	// Patch the resource
 	timestamp := time.Now().Format(time.RFC3339)
-	log.Printf("Updating %s/%s (objects changed: %v, secretObjects changed: %v)",
-		namespace, name, objectsChanged, secretObjectsChanged)
+	slog.Info("Applying updates",
+		    "namespace", namespace, "name", name, "objectsChanged", objectsChanged, "secretObjectsChanged", secretObjectsChanged)
 	err = PatchSecretProviderClass(
 		ctrl.ctx,
 		ctrl.client,
@@ -364,21 +364,21 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		return fmt.Errorf("error patching: %w", err)
 	}
 
-	log.Printf("Successfully updated %s/%s with %d objects (%d secrets, %d certs)",
-		namespace, name, len(discoveredObjects), len(secrets), len(certificates))
+	slog.Info("Successfully updated SecretProviderClass",
+		"namespace", namespace, "name", name, "totalObjects", len(discoveredObjects), "secrets", len(secrets), "certificates", len(certificates))
 
 	return nil
 }
 
 // enqueueAll enqueues all valid resources for reconciliation
 func (ctrl *Controller) enqueueAll() {
-	log.Println("Periodic resync: enqueuing all tracked resources")
+	slog.Info("Periodic resync starting")
 
 	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(
 		ctrl.ctx, metav1.ListOptions{},
 	)
 	if err != nil {
-		log.Printf("Error listing resources for resync: %v", err)
+		slog.Error("Error listing resources for resync", "error", err)
 		return
 	}
 
@@ -391,17 +391,17 @@ func (ctrl *Controller) enqueueAll() {
 		}
 	}
 
-	log.Printf("Enqueued %d resources for periodic resync", enqueuedCount)
+	slog.Info("Periodic resync complete", "enqueuedCount", enqueuedCount)
 }
 
 func (ctrl *Controller) syncCache() {
-	log.Println("Performing initial sync")
+	slog.Info("Performing initial sync")
 	// Use enqueueAll for initial sync as well
 	ctrl.enqueueAll()
 }
 
 func (ctrl *Controller) startPeriodicResync() {
-	ticker := time.NewTicker(resyncInterval)
+	ticker := time.NewTicker(ctrl.config.SyncInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		ctrl.enqueueAll()
@@ -444,13 +444,13 @@ func (ctrl *Controller) handleReconcileResult(key QueueKey, err error) {
 	numRequeues := ctrl.queue.NumRequeues(key)
 	if numRequeues < maxRetries {
 		// Retry with exponential backoff
-		log.Printf("Error reconciling %v (attempt %d/%d), retrying: %v", key, numRequeues+1, maxRetries, err)
+		slog.Warn("Error reconciling resource, retrying", "key", key, "attempt", numRequeues+1, "maxRetries", maxRetries, "error", err)
 		ctrl.queue.AddRateLimited(key)
 		return
 	}
 
 	// Max retries exceeded - give up
-	log.Printf("Dropping %v from queue after %d failed attempts: %v", key, maxRetries, err)
+	slog.Error("Dropping from queue after max retries", "key", key, "maxRetries", maxRetries, "error", err)
 	ctrl.queue.Forget(key)
 }
 
@@ -469,7 +469,7 @@ func (ctrl *Controller) reconcile(key QueueKey) error {
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Resource deleted, remove from cache
-			log.Printf("Resource %s/%s not found, removing from cache", namespace, name)
+			slog.Info("Resource not found, removing from cache", "namespace", namespace, "name", name)
 			ctrl.cache.Delete(namespace, name)
 			ctrl.printCache()
 			return nil
@@ -479,7 +479,7 @@ func (ctrl *Controller) reconcile(key QueueKey) error {
 
 	// Validate if resource should be synced
 	if valid, _ := isValidForSync(obj); !valid {
-		log.Printf("Resource %s/%s not valid for sync, skipping", namespace, name)
+		slog.Debug("Resource not valid for sync, skipping", "namespace", namespace, "name", name)
 		return nil
 	}
 
@@ -505,18 +505,18 @@ func (ctrl *Controller) Run() {
 	go ctrl.startPeriodicResync()
 
 	// Start worker pool
-	log.Printf("Starting %d workers...", numWorkers)
-	for range numWorkers {
+	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)
+	for range ctrl.config.WorkerCount {
 		go ctrl.worker()
 	}
 	ctrl.healthChecker.SetWorkersRunning(true)
 
-	log.Println("Watching for events...")
+	slog.Info("Watching for events")
 
 	for {
 		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace("").Watch(ctrl.ctx, metav1.ListOptions{})
 		if err != nil {
-			log.Printf("Error creating watcher: %v", err)
+			slog.Error("Error creating watcher", "error", err)
 			ctrl.healthChecker.SetWatchConnected(false)
 			time.Sleep(retryDelay)
 			continue
@@ -524,14 +524,14 @@ func (ctrl *Controller) Run() {
 
 		// Mark watch as connected
 		ctrl.healthChecker.SetWatchConnected(true)
-		log.Println("Watch connected successfully")
+		slog.Info("Watch connected successfully")
 
 		for event := range watcher.ResultChan() {
 			ctrl.handleEvent(event)
 			ctrl.healthChecker.UpdateWatchActivity()
 		}
 
-		log.Println("Watch connection closed, reconnecting in 5 seconds...")
+		slog.Info("Watch connection closed, reconnecting", "delay", "5s")
 		ctrl.healthChecker.SetWatchConnected(false)
 		watcher.Stop()
 		time.Sleep(retryDelay)

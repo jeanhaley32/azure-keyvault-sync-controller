@@ -1,7 +1,9 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
+	"os"
 	"path/filepath"
 
 	"k8s.io/client-go/dynamic"
@@ -11,38 +13,58 @@ import (
 )
 
 func main() {
-	log.Println("Starting SecretProviderClass watcher")
+	// Load and validate configuration
+	cfg, err := LoadConfig()
+	if err != nil {
+		// Can't use slog yet since logger isn't initialized
+		println("FATAL: Configuration error:", err.Error())
+		os.Exit(1)
+	}
+
+	// Initialize structured logger with configuration
+	InitLogger(cfg)
+
+	slog.Info("Starting Azure Key Vault Sync Controller")
+	slog.Info("Configuration loaded",
+		"syncInterval", cfg.SyncInterval,
+		"workerCount", cfg.WorkerCount,
+		"logLevel", cfg.LogLevel)
 
 	var kubeconfig string
 	if home := homedir.HomeDir(); home != "" {
 		kubeconfig = filepath.Join(home, ".kube", "config")
 	} else {
-		log.Fatal("Unable to find home directory")
+		slog.Error("Unable to find home directory")
+		os.Exit(1)
 	}
 
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
-		log.Fatalf("Error building kubeconfig: %v", err)
+		slog.Error("Error building kubeconfig", "error", err)
+		os.Exit(1)
 	}
 
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		log.Fatalf("Error creating dynamic client: %v", err)
+		slog.Error("Error creating dynamic client", "error", err)
+		os.Exit(1)
 	}
 
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Fatalf("Error creating kubernetes clientset: %v", err)
+		slog.Error("Error creating kubernetes clientset", "error", err)
+		os.Exit(1)
 	}
 
-	controller := NewController(dynamicClient, clientset)
+	controller := NewController(dynamicClient, clientset, cfg)
 
 	// Start health check server
-	healthAddr := ":8080"
-	log.Printf("Starting health check server on %s", healthAddr)
+	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
+	slog.Info("Starting health check server", "address", healthAddr)
 	go func() {
 		if err := StartHealthCheckServer(healthAddr, controller.healthChecker); err != nil {
-			log.Fatalf("Health check server failed: %v", err)
+			slog.Error("Health check server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 

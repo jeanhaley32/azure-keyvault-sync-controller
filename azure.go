@@ -1,9 +1,10 @@
 package main
 
 import (
+	"log/slog"
 	"context"
 	"fmt"
-	"log"
+	
 	"os"
 	"sync"
 	"time"
@@ -58,13 +59,13 @@ func (ac *AzureTokenCache) GetToken(
 		token := ac.tokens[key].Token
 		expiration := ac.tokens[key].ExpirationTime
 		ac.mu.RUnlock()
-		log.Printf("Using cached Azure AD token for %s", key)
+		slog.Debug("Using cached Azure AD token", "key", key)
 		return token, expiration, nil
 	}
 
 	// Need to acquire new token
-	log.Printf("Acquiring Azure AD token for %s (clientID: %s, tenantID: %s)",
-		key, clientID, tenantID)
+	slog.Info("Acquiring Azure AD token",
+		    "key", key, "clientID", clientID, "tenantID", tenantID)
 
 	token, expiration, err := ac.exchangeToken(ctx, k8sToken, clientID, tenantID)
 	if err != nil {
@@ -83,8 +84,8 @@ func (ac *AzureTokenCache) GetToken(
 	}
 	ac.mu.Unlock()
 
-	log.Printf("Successfully cached Azure AD token for %s, expires at %s",
-		key, expiration.Format(time.RFC3339))
+	slog.Info("Successfully cached Azure AD token",
+		"key", key, "expiresAt", expiration.Format(time.RFC3339))
 
 	return token, expiration, nil
 }
@@ -116,7 +117,7 @@ func (ac *AzureTokenCache) exchangeToken(
 	clientID string,
 	tenantID string,
 ) (string, time.Time, error) {
-	log.Printf("Exchanging Kubernetes token for Azure AD token")
+	slog.Debug("Exchanging Kubernetes token for Azure AD token")
 
 	// Write K8s token to temporary file
 	tmpFile, err := os.CreateTemp("", "k8s-token-*.jwt")
@@ -139,14 +140,14 @@ func (ac *AzureTokenCache) exchangeToken(
 	}
 	tmpFile.Close()
 
-	log.Printf("Created temporary token file: %s", tmpFilePath)
+	slog.Debug("Created temporary token file", "path", tmpFilePath)
 
 	// Set environment variables for WorkloadIdentityCredential
 	os.Setenv("AZURE_FEDERATED_TOKEN_FILE", tmpFilePath)
 	os.Setenv("AZURE_CLIENT_ID", clientID)
 	os.Setenv("AZURE_TENANT_ID", tenantID)
 
-	log.Printf("Set environment variables for Azure authentication")
+	slog.Debug("Set environment variables for Azure authentication")
 
 	// Create WorkloadIdentityCredential
 	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
@@ -154,7 +155,7 @@ func (ac *AzureTokenCache) exchangeToken(
 		return "", time.Time{}, fmt.Errorf("failed to create WorkloadIdentityCredential: %w", err)
 	}
 
-	log.Printf("Created WorkloadIdentityCredential")
+	slog.Debug("Created WorkloadIdentityCredential")
 
 	// Request Azure AD token with Key Vault scope
 	tokenResponse, err := cred.GetToken(ctx, policy.TokenRequestOptions{
@@ -164,8 +165,8 @@ func (ac *AzureTokenCache) exchangeToken(
 		return "", time.Time{}, fmt.Errorf("failed to get Azure AD token: %w", err)
 	}
 
-	log.Printf("Successfully obtained Azure AD token, expires at %s",
-		tokenResponse.ExpiresOn.Format(time.RFC3339))
+	slog.Info("Successfully obtained Azure AD token",
+		"expiresAt", tokenResponse.ExpiresOn.Format(time.RFC3339))
 
 	return tokenResponse.Token, tokenResponse.ExpiresOn, nil
 }
@@ -180,8 +181,8 @@ func ExtractTenantID(obj *unstructured.Unstructured) (string, error) {
 		return "", fmt.Errorf("tenantId not found in spec.parameters")
 	}
 
-	log.Printf("Extracted tenantID: %s from %s/%s",
-		tenantID, obj.GetNamespace(), obj.GetName())
+	slog.Debug("Extracted tenantID",
+		    "tenantID", tenantID, "namespace", obj.GetNamespace(), "name", obj.GetName())
 
 	return tenantID, nil
 }

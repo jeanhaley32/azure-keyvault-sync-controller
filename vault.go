@@ -1,9 +1,10 @@
 package main
 
 import (
+	"log/slog"
 	"context"
 	"fmt"
-	"log"
+	
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -40,8 +41,8 @@ func ExtractKeyvaultName(obj *unstructured.Unstructured) (string, error) {
 		return "", fmt.Errorf("keyvaultName not found in spec.parameters")
 	}
 
-	log.Printf("Extracted keyvaultName: %s from %s/%s",
-		keyvaultName, obj.GetNamespace(), obj.GetName())
+	slog.Info("Extracted keyvaultName",
+		    "vault", keyvaultName, "namespace", obj.GetNamespace(), "name", obj.GetName())
 
 	return keyvaultName, nil
 }
@@ -55,7 +56,7 @@ func ListSecrets(
 ) ([]string, error) {
 	vaultURL := fmt.Sprintf("https://%s.vault.azure.net", vaultName)
 
-	log.Printf("Listing secrets from vault: %s", vaultURL)
+	slog.Debug("Listing secrets from vault", "url", vaultURL)
 
 	// Create credential wrapper
 	cred := &CachedTokenCredential{
@@ -85,17 +86,17 @@ func ListSecrets(
 				if secret.ID != nil {
 					secretName := secret.ID.Name()
 					secrets = append(secrets, secretName)
-					log.Printf("  Found secret: %s (enabled)", secretName)
+					slog.Debug("Found enabled secret", "name", secretName)
 				}
 			} else {
 				if secret.ID != nil {
-					log.Printf("  Skipping disabled secret: %s", secret.ID.Name())
+					slog.Debug("Skipping disabled secret", "name", secret.ID.Name())
 				}
 			}
 		}
 	}
 
-	log.Printf("Successfully listed %d enabled secrets from vault %s", len(secrets), vaultName)
+	slog.Info("Listed secrets from vault", "count", len(secrets), "vault", vaultName)
 	return secrets, nil
 }
 
@@ -108,7 +109,7 @@ func ListCertificates(
 ) ([]string, error) {
 	vaultURL := fmt.Sprintf("https://%s.vault.azure.net", vaultName)
 
-	log.Printf("Listing certificates from vault: %s", vaultURL)
+	slog.Debug("Listing certificates from vault", "url", vaultURL)
 
 	// Create credential wrapper
 	cred := &CachedTokenCredential{
@@ -138,16 +139,16 @@ func ListCertificates(
 				if cert.ID != nil {
 					certName := cert.ID.Name()
 					certificates = append(certificates, certName)
-					log.Printf("  Found certificate: %s (enabled)", certName)
+					slog.Debug("Found enabled certificate", "name", certName)
 				}
 			} else {
 				if cert.ID != nil {
-					log.Printf("  Skipping disabled certificate: %s", cert.ID.Name())
+					slog.Debug("Skipping disabled certificate", "name", cert.ID.Name())
 				}
 			}
 		}
 	}
 
-	log.Printf("Successfully listed %d enabled certificates from vault %s", len(certificates), vaultName)
+	slog.Info("Listed certificates from vault", "count", len(certificates), "vault", vaultName)
 	return certificates, nil
 }
