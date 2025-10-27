@@ -1,10 +1,11 @@
 package main
 
 import (
+	"log/slog"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	
 	"sort"
 	"strings"
 
@@ -70,8 +71,8 @@ func GenerateObjectsFromVault(secrets []string, certs []string) []VaultObject {
 		return objects[i].ObjectName < objects[j].ObjectName
 	})
 
-	log.Printf("Generated %d objects from vault (%d secrets, %d certs)",
-		len(objects), len(secrets), len(certs))
+	slog.Info("Generated objects from vault",
+		"totalObjects", len(objects), "secrets", len(secrets), "certificates", len(certs))
 
 	return objects
 }
@@ -105,8 +106,8 @@ func DetectChanges(current string, new string) bool {
 	changed := currentNorm != newNorm
 
 	if changed {
-		log.Printf("Change detected: current length=%d, new length=%d",
-			len(currentNorm), len(newNorm))
+		slog.Debug("Change detected in objects",
+			"currentLength", len(currentNorm), "newLength", len(newNorm))
 	}
 
 	return changed
@@ -123,7 +124,7 @@ func PatchSecretProviderClass(
 	secretObjects interface{},
 	timestamp string,
 ) error {
-	log.Printf("Patching SecretProviderClass %s/%s", namespace, name)
+	slog.Info("Patching SecretProviderClass", "namespace", namespace, "name", name)
 
 	// Create JSON Patch payload
 	// Note: Use ~1 to escape / in annotation key (JSON Pointer RFC 6901)
@@ -149,7 +150,7 @@ func PatchSecretProviderClass(
 				"op":   "remove",
 				"path": "/spec/secretObjects",
 			})
-			log.Printf("Removing secretObjects field from %s/%s", namespace, name)
+			slog.Debug("Removing secretObjects field", "namespace", namespace, "name", name)
 		} else {
 			// Replace field with new value
 			patch = append(patch, map[string]interface{}{
@@ -167,7 +168,7 @@ func PatchSecretProviderClass(
 	}
 
 	// Log patch for debugging
-	log.Printf("DEBUG: Applying JSON Patch to %s/%s: %s", namespace, name, string(patchBytes))
+	slog.Debug("Applying JSON Patch", "namespace", namespace, "name", name, "patch", string(patchBytes))
 
 	// Apply the patch
 	_, err = client.Resource(gvr).Namespace(namespace).Patch(
@@ -182,7 +183,7 @@ func PatchSecretProviderClass(
 		return fmt.Errorf("error applying patch: %w", err)
 	}
 
-	log.Printf("Successfully patched %s/%s", namespace, name)
+	slog.Info("Successfully patched SecretProviderClass", "namespace", namespace, "name", name)
 	return nil
 }
 
@@ -198,7 +199,7 @@ func CompareSecretObjects(obj *unstructured.Unstructured, generated []SecretObje
 
 	// Check count first
 	if len(existingRaw) != len(generated) {
-		log.Printf("SecretObjects count changed: existing=%d, generated=%d", len(existingRaw), len(generated))
+		slog.Debug("SecretObjects count changed", "existing", len(existingRaw), "generated", len(generated))
 		return true
 	}
 
@@ -217,7 +218,7 @@ func CompareSecretObjects(obj *unstructured.Unstructured, generated []SecretObje
 	// Compare each object
 	for i := range generated {
 		if !secretObjectsEqual(existingObjects[i], generated[i]) {
-			log.Printf("SecretObject %d changed", i)
+			slog.Debug("SecretObject changed", "index", i)
 			return true
 		}
 	}
@@ -259,7 +260,7 @@ func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecr
 				},
 			})
 		}
-		log.Printf("Generated %d Opaque secretObjects for secrets", len(secrets))
+		slog.Debug("Generated Opaque secretObjects for secrets", "count", len(secrets))
 	}
 
 	// Add certificates (type: kubernetes.io/tls) if enabled
@@ -280,7 +281,7 @@ func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecr
 				},
 			})
 		}
-		log.Printf("Generated %d TLS secretObjects for certificates", len(certs))
+		slog.Debug("Generated TLS secretObjects for certificates", "count", len(certs))
 	}
 
 	// Sort by secretName for consistent output
@@ -288,6 +289,6 @@ func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecr
 		return secretObjects[i].SecretName < secretObjects[j].SecretName
 	})
 
-	log.Printf("Generated %d total secretObjects", len(secretObjects))
+	slog.Info("Generated secretObjects", "totalCount", len(secretObjects))
 	return secretObjects
 }

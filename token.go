@@ -1,9 +1,10 @@
 package main
 
 import (
+	"log/slog"
 	"context"
 	"fmt"
-	"log"
+	
 	"sync"
 	"time"
 
@@ -47,7 +48,7 @@ func tokenCacheKey(namespace, serviceAccount string) string {
 
 // requestToken requests a token from Kubernetes for the specified service account
 func (tc *TokenCache) requestToken(ctx context.Context, clientset kubernetes.Interface, namespace, serviceAccount string) (string, time.Time, error) {
-	log.Printf("Requesting token for serviceaccount %s/%s", namespace, serviceAccount)
+	slog.Debug("Requesting token for serviceaccount", "namespace", namespace, "serviceAccount", serviceAccount)
 
 	// Create TokenRequest
 	expirationSeconds := int64(tokenExpirationSeconds)
@@ -67,8 +68,9 @@ func (tc *TokenCache) requestToken(ctx context.Context, clientset kubernetes.Int
 		return "", time.Time{}, fmt.Errorf("failed to request token: %w", err)
 	}
 
-	log.Printf("Successfully obtained token for %s/%s, expires at %s",
-		namespace, serviceAccount, result.Status.ExpirationTimestamp.Time.Format(time.RFC3339))
+	slog.Info("Successfully obtained Kubernetes token",
+		"namespace", namespace, "serviceAccount", serviceAccount,
+		"expiresAt", result.Status.ExpirationTimestamp.Time.Format(time.RFC3339))
 
 	return result.Status.Token, result.Status.ExpirationTimestamp.Time, nil
 }
@@ -98,7 +100,7 @@ func (tc *TokenCache) GetToken(ctx context.Context, clientset kubernetes.Interfa
 		tc.mu.RLock()
 		token := tc.tokens[tokenCacheKey(namespace, serviceAccount)].Token
 		tc.mu.RUnlock()
-		log.Printf("Using cached token for %s/%s", namespace, serviceAccount)
+		slog.Debug("Using cached Kubernetes token", "namespace", namespace, "serviceAccount", serviceAccount)
 		return token, nil
 	}
 
@@ -131,6 +133,6 @@ func ExtractClientID(obj *unstructured.Unstructured) (string, error) {
 		return "", fmt.Errorf("clientID not found in spec.parameters")
 	}
 
-	log.Printf("Extracted clientID: %s from %s/%s", clientID, obj.GetNamespace(), obj.GetName())
+	slog.Debug("Extracted clientID", "clientID", clientID, "namespace", obj.GetNamespace(), "name", obj.GetName())
 	return clientID, nil
 }
