@@ -495,9 +495,8 @@ docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:main-<sha>
 - `main-<sha>` - Specific commit builds
 - Semantic version tags (e.g., `v1.0.0`) will be created when releases are tagged
 
-**Platforms:**
+**Platform:**
 - linux/amd64
-- linux/arm64
 
 ### For Kaufman Rossin
 

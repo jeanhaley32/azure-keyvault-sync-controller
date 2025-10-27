@@ -15,7 +15,9 @@ COPY *.go ./
 # Build the controller
 # CGO_ENABLED=0 for static binary
 # -ldflags="-w -s" to reduce binary size
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# TARGETARCH is automatically set by buildx for multi-platform builds
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s" \
     -o azure-keyvault-sync-controller \
     .
