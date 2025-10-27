@@ -452,13 +452,22 @@ The repository includes a GitHub Actions workflow (`.github/workflows/build-and-
 - Creates version tags from git tags
 - Runs on every push to main and on version tags
 
+## Security
+
+The controller is **Pod Security Standards (PSS) Restricted-compliant**:
+- Non-root user (UID 65534)
+- Read-only root filesystem
+- All capabilities dropped
+- No privilege escalation
+- Seccomp profile enabled (RuntimeDefault)
+
+Deploy to namespaces with PSS enforcement enabled for maximum security.
+
 ## Next Steps
 
 **Phase 5: Production Enhancements** (Future)
 - Structured logging with log levels (info, warn, error, debug)
-- Health check endpoints (/healthz, /readyz)
 - Configuration management via ConfigMap
-- Additional security hardening (capabilities, network policies, PSS)
 - Comprehensive test coverage (unit, integration, e2e)
 
 ## License

@@ -184,7 +184,7 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 
 ### 5.1 Observability
 - [ ] Structured logging with log levels (info, warn, error, debug)
-- [ ] Health check endpoints (/healthz, /readyz)
+- [x] Health check endpoints (/healthz, /readyz)
 
 ### 5.2 Configuration Management
 - [ ] ConfigMap-based configuration
@@ -200,11 +200,11 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 - Vault URL patterns
 
 ### 5.3 Security Hardening
-- [x] Run as non-root user (UID 65532 in distroless)
+- [x] Run as non-root user (UID 65534 in deployment)
 - [x] Read-only root filesystem (distroless static)
-- [ ] Drop all Linux capabilities (securityContext)
-- [ ] Network policies for egress control
-- [ ] Pod Security Standards compliance (pod spec annotations)
+- [x] Drop all Linux capabilities (securityContext)
+- [x] Pod Security Standards Restricted compliance (seccompProfile)
+- [ ] Network policies for egress control (optional)
 
 ### 5.4 Testing
 - [ ] Unit tests for all components
