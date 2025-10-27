@@ -281,7 +281,6 @@ Repository can be forked to Kaufman Rossin's GitHub organization. GitHub Actions
 - Configuration management via ConfigMap
 - Additional security hardening (capabilities, network policies, PSS)
 - Comprehensive test coverage (unit, integration, e2e)
-- Helm chart and Kustomize manifests
 
 ---
 

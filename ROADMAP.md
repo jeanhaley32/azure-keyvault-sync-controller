@@ -222,10 +222,9 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 - [ ] API reference (GoDoc comments)
 
 ### 5.6 Deployment
-- [ ] Helm chart for installation
-- [ ] Kustomize manifests
 - [x] Container image in registry (GHCR)
 - [x] Automated CI/CD pipeline (GitHub Actions)
+- [x] Plain YAML manifests (deploy/ directory)
 - [ ] Release process documentation (tagging strategy)
 
 ## Phase 6: Advanced Features

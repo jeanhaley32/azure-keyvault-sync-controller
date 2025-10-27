@@ -460,7 +460,6 @@ The repository includes a GitHub Actions workflow (`.github/workflows/build-and-
 - Configuration management via ConfigMap
 - Additional security hardening (capabilities, network policies, PSS)
 - Comprehensive test coverage (unit, integration, e2e)
-- Helm chart and Kustomize manifests
 
 ## License
 
