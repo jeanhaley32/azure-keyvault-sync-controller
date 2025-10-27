@@ -262,38 +262,157 @@ Implemented opt-in filtering for controller management:
 - Go module: `github.com/jeanhaley32/azure-keyvault-sync-controller`
 - Dependencies: k8s.io/client-go, k8s.io/apimachinery
 
-## Next Steps
+## 2025-10-27
 
-1. ✅ ~~**Token Acquisition**~~ - COMPLETE (Phase 2.1)
-2. **Azure AD Token Exchange** - Trade Kubernetes tokens for Azure AD tokens via Workload Identity federation (Phase 2.2 - NEXT)
-3. **Azure Key Vault Integration** - List secrets and certificates from vault (Phase 3)
-4. **SecretProviderClass Updates** - Automatically populate objects array with discovered vault contents (Phase 4)
+### Phase 4: SecretProviderClass Updates - ✅ COMPLETE
+**Branch:** `secretproviderclass-updates`
+**PR:** #8
 
-## Architecture
+Implemented automatic SecretProviderClass object and secretObjects array population from Azure Key Vault contents.
 
-### Current State
-- Watch SecretProviderClass resources
-- Filter by annotations for opt-in management
-- Maintain cache of managed objects
-- Track service account associations
-- ✅ Acquire Kubernetes tokens via TokenRequest API
-- ✅ Cache tokens with automatic renewal (Phase 2.1 COMPLETE)
+**New Files:**
+- `update.go`: SecretProviderClass patching logic (384 lines)
+  - GenerateObjectsFromVault() - Creates objects array from vault secrets/certs
+  - GenerateSecretObjectsFromVault() - Creates secretObjects for K8s Secrets
+  - PatchSecretProviderClass() - JSON Patch updates with change detection
+  - CompareObjects/CompareSecretObjects() - Deep comparison for change detection
+- `planning/secretproviderclass-updates.md`: Implementation planning (462 lines)
+  - Vault as source of truth design decision
+  - JSON Patch strategy with change detection
+  - secretObjects generation bonus feature
 
-### Target Architecture
-```
-Controller → Impersonate ServiceAccount
-  → Kubernetes TokenRequest API
-  → Azure Workload Identity federation
-  → Azure Managed Identity
-  → Azure Key Vault RBAC
-  → List secrets/certificates
-  → Update SecretProviderClass
-```
+**Modified Files:**
+- `controller.go`: Integrated patching into syncCache()
+  - Calls GenerateObjectsFromVault() with discovered vault contents
+  - Calls GenerateSecretObjectsFromVault() based on annotations
+  - Applies JSON Patch to update SecretProviderClass
+  - Adds last-sync timestamp annotation
 
-## Branch Status
+**Key Features:**
+- Vault is single source of truth (no manual object preservation)
+- Automatic objects array population from all enabled secrets/certs
+- Optional secretObjects generation (Opaque for secrets, TLS for certs)
+- JSON Patch updates with RFC 6902 compliance
+- Change detection prevents unnecessary updates
+- Field removal when annotations disabled
+- Last-sync timestamp tracking
 
-- `main` - Stable, merged features (includes Phase 2.1)
-- `annotation-support` - Merged to main (PR #1)
-- `service-account-discovery` - Merged to main (PR #2)
-- `refactor-file-structure` - Merged to main (PR #3)
-- `token-acquisition` - Merged to main (PR #4, Phase 2.1 COMPLETE)
+**Annotation Support:**
+- `azure-keyvault-sync/secret-objects: "true"` - Enable K8s Secret creation
+- `azure-keyvault-sync/cert-objects: "true"` - Enable TLS Secret creation
+- `azure-keyvault-sync/last-sync` - Auto-populated timestamp
+
+**Testing Results:**
+- Successfully patched SecretProviderClass with vault contents
+- Change detection working (skips updates when no changes)
+- secretObjects generation validated (Opaque + TLS types)
+- No update loops or race conditions
+- Field removal verified when annotations removed
+
+**Next:** Architecture improvements for production readiness
+
+### Architecture Improvements: Work Queue Pattern - ✅ COMPLETE
+**Branch:** `architecture-improvements`
+**PR:** #9
+
+Implemented industry-standard Kubernetes controller work queue pattern for improved reliability and performance.
+
+**Modified Files:**
+- `controller.go`: Complete refactor with work queue architecture (446 lines)
+  - Added workqueue.RateLimitingInterface with exponential backoff
+  - Implemented 5 concurrent worker goroutines
+  - Event handlers now enqueue items instead of direct processing
+  - Added reconcileResource() for single-resource processing
+  - Retry logic with max 5 attempts before dropping
+  - Graceful error handling (failed resources don't block others)
+
+**Key Features:**
+- Immediate event-driven reconciliation (no 5-minute wait)
+- Automatic event deduplication (multiple events → single reconciliation)
+- Rate limiting (max 5 concurrent reconciliations)
+- Retry logic with exponential backoff
+- Graceful degradation (permission errors don't block other resources)
+- No race conditions or reconciliation loops
+
+**Architecture Benefits:**
+- Separation of event watching from reconciliation processing
+- Work queue provides natural deduplication
+- Rate limiting prevents API server overload
+- Retry logic handles transient failures
+- Each resource processed independently
+
+**Testing Results:**
+- Event deduplication verified (3 events → 1 reconciliation)
+- Concurrent processing working (5 workers)
+- Retry logic validated (5 attempts on errors)
+- Failed resources don't block others
+- No crashes or race conditions during testing
+
+**Planning Documentation:**
+- `planning/architecture-improvements.md`: Comprehensive analysis (385 lines)
+- `planning/workflow-blindspot-fixes.md`: Vault as source of truth validation
+
+### Critical Bug Fix: 403 Forbidden Error Handling
+**Branch:** `main`
+**Commit:** 3a34a96
+
+Fixed critical bug where Azure Key Vault permission errors (403 Forbidden) would continue reconciliation with empty secrets/certs lists, effectively clearing the SecretProviderClass objects.
+
+**Fix Applied:**
+- Modified vault error handling in controller.go (lines 268-290)
+- ListSecrets() errors now fail reconciliation instead of continuing with nil
+- ListCertificates() errors now fail reconciliation instead of continuing with nil
+- Triggers retry logic (5 attempts with exponential backoff)
+- After max retries, item dropped from queue while preserving existing objects
+
+**Impact:**
+- Vault permission errors no longer clear SecretProviderClass data
+- Existing objects preserved during permission failures
+- Retry logic gives time for RBAC issues to be resolved
+
+### Deployment Infrastructure - ✅ COMPLETE
+**Branch:** `main`
+
+Created complete deployment infrastructure for container image distribution and automated builds.
+
+**New Files:**
+- `Dockerfile`: Multi-stage build with Go 1.25 and distroless runtime
+- `.dockerignore`: Build context optimization
+- `Makefile`: Build automation (build, docker-build, docker-push, deploy)
+- `.github/workflows/build-and-push.yaml`: GitHub Actions CI/CD
+- `examples/basic-sync.yaml`: Minimal configuration example
+- `examples/with-secrets.yaml`: With secretObjects generation
+- `examples/full-example.yaml`: Complete example with ServiceAccount and Pod
+- `examples/README.md`: Usage guide and troubleshooting
+
+**Modified Files:**
+- `deploy/deployment.yaml`: Updated image to ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
+- `README.md`: Added Container Images section and CI/CD documentation
+- `ROADMAP.md`: Marked Phase 4 complete
+
+**Key Features:**
+- Multi-arch builds (linux/amd64, linux/arm64)
+- Automated builds on push to main
+- GitHub Container Registry (GHCR) hosting
+- Distroless runtime for minimal attack surface
+- Non-root user (UID 65532)
+- Makefile for development workflow
+
+**Image Repository:**
+- `ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest`
+- Public repository, no authentication required
+- Automated builds via GitHub Actions
+
+## Current Status
+
+**✅ Production Ready**
+
+All planned phases (1-4) complete with production-grade features:
+- Work queue architecture with retry logic
+- Automatic vault synchronization
+- Kubernetes Secret generation
+- Comprehensive error handling
+- Container images available on GHCR
+- Complete documentation and examples
+
+See [ROADMAP.md](ROADMAP.md) for detailed implementation history and future enhancements.
