@@ -56,7 +56,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	controller := NewController(dynamicClient, clientset, cfg)
+	// Read watch namespace from environment (empty = cluster-wide for backward compatibility)
+	watchNamespace := os.Getenv("WATCH_NAMESPACE")
+	if watchNamespace != "" {
+		slog.Info("Namespace-scoped mode enabled", "namespace", watchNamespace)
+	} else {
+		slog.Info("Cluster-wide mode enabled (watching all namespaces)")
+	}
+
+	controller := NewController(dynamicClient, clientset, cfg, watchNamespace)
 
 	// Start health check server
 	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
