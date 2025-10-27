@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -183,6 +184,60 @@ func PatchSecretProviderClass(
 
 	log.Printf("Successfully patched %s/%s", namespace, name)
 	return nil
+}
+
+// CompareSecretObjects compares existing secretObjects in the resource with generated ones
+// Returns true if they are different, false if identical
+func CompareSecretObjects(obj *unstructured.Unstructured, generated []SecretObject) bool {
+	// Extract existing secretObjects from spec
+	existingRaw, found, err := unstructured.NestedSlice(obj.Object, "spec", "secretObjects")
+	if err != nil || !found {
+		// No existing secretObjects, different if we have generated ones
+		return len(generated) > 0
+	}
+
+	// Check count first
+	if len(existingRaw) != len(generated) {
+		log.Printf("SecretObjects count changed: existing=%d, generated=%d", len(existingRaw), len(generated))
+		return true
+	}
+
+	// Convert existing to SecretObject structs for deep comparison
+	var existingObjects []SecretObject
+	existingJSON, err := json.Marshal(existingRaw)
+	if err != nil {
+		return true
+	}
+
+	err = json.Unmarshal(existingJSON, &existingObjects)
+	if err != nil {
+		return true
+	}
+
+	// Compare each object
+	for i := range generated {
+		if !secretObjectsEqual(existingObjects[i], generated[i]) {
+			log.Printf("SecretObject %d changed", i)
+			return true
+		}
+	}
+
+	return false
+}
+
+// secretObjectsEqual compares two SecretObject structs for equality
+func secretObjectsEqual(a, b SecretObject) bool {
+	if a.SecretName != b.SecretName || a.Type != b.Type || len(a.Data) != len(b.Data) {
+		return false
+	}
+
+	for i := range a.Data {
+		if a.Data[i].Key != b.Data[i].Key || a.Data[i].ObjectName != b.Data[i].ObjectName {
+			return false
+		}
+	}
+
+	return true
 }
 
 // GenerateSecretObjectsFromVault creates SecretObject entries for vault secrets and certificates

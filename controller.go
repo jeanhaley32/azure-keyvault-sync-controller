@@ -317,6 +317,7 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 
 	// Process secretObjects
 	var secretObjectsToSync interface{}
+	var secretObjectsChanged bool
 	annotations := obj.GetAnnotations()
 	enableSecretObjects := annotations != nil && annotations[annotationSecretObjects] == annotationEnabledValue
 	enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
@@ -333,12 +334,17 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 			enableCertObjects,
 		)
 
-		secretObjectsToSync = generatedSecretObjects
+		// Check if secretObjects actually changed
+		if CompareSecretObjects(obj, generatedSecretObjects) {
+			secretObjectsToSync = generatedSecretObjects
+			secretObjectsChanged = true
+		}
 	} else {
 		// Check if field exists and needs removal
 		existingSecretObjects, found, _ := unstructured.NestedSlice(obj.Object, "spec", "secretObjects")
 		if found && len(existingSecretObjects) > 0 {
 			secretObjectsToSync = "REMOVE_FIELD"
+			secretObjectsChanged = true
 			log.Printf("Annotation disabled for %s/%s, will clear secretObjects field", namespace, name)
 		}
 	}
@@ -346,9 +352,6 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	// Check if update needed
 	currentObjects, _, _ := unstructured.NestedString(obj.Object, "spec", "parameters", "objects")
 	objectsChanged := DetectChanges(currentObjects, newObjects)
-
-	// Check if secretObjects changed
-	secretObjectsChanged := secretObjectsToSync != nil
 
 	if !objectsChanged && !secretObjectsChanged {
 		log.Printf("No changes detected for %s/%s, skipping update", namespace, name)
