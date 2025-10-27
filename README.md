@@ -13,61 +13,62 @@ This controller watches SecretProviderClass resources and automatically:
 
 **Key Feature:** Vault is the single source of truth - no manual object management required.
 
-## Current State
+## Quick Start
 
-**Status:** Phase 4 Complete - Production Ready ✅
+**Prerequisites:**
+- Kubernetes cluster with Azure Workload Identity installed
+- Azure Key Vault with secrets/certificates
+- Managed Identity with Key Vault RBAC permissions
+- Federated Identity Credential configured
 
-### Implemented Features
+**Deploy Controller:**
+```bash
+# Apply RBAC and controller
+kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac.yaml
+kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment.yaml
+```
 
-**Phase 1: Foundation** ✅
-- Watch SecretProviderClass resources across all namespaces
-- Annotation-based opt-in filtering (`azure-keyvault-sync/enabled: "true"`)
-- Service account discovery via annotations
-- Thread-safe in-memory cache with mutex protection
-- Automatic watch reconnection on failures
-- Work queue architecture with event deduplication
+**Create SecretProviderClass:**
+```bash
+# See examples/ directory for complete examples
+kubectl apply -f examples/basic-sync.yaml  # Customize with your vault details
+```
 
-**Phase 2.1: Kubernetes Token Acquisition** ✅
-- Service account impersonation via TokenRequest API
-- Real Kubernetes JWT token acquisition
-- Token caching with automatic renewal (80% of 1-hour lifetime)
-- ClientID extraction from SecretProviderClass spec.parameters
-- Tested and verified against real AKS cluster
+**Verify:**
+```bash
+# Check controller logs
+kubectl logs -n kube-system -l app=azure-keyvault-sync-controller
 
-**Phase 2.2: Azure AD Token Exchange** ✅
-- WorkloadIdentityCredential integration (Azure SDK)
-- Exchange K8s JWT for Azure AD access tokens via federated identity
-- Azure AD token caching with automatic renewal (80% of lifetime)
-- TenantID extraction from SecretProviderClass spec.parameters
-- Secure temporary file handling for token exchange
-- Service-level token scope (multi-vault support)
-- Tested with real AKS cluster and Azure federated identity
+# Verify sync completed
+kubectl get secretproviderclass <name> -o jsonpath='{.metadata.annotations.azure-keyvault-sync/last-sync}'
+```
 
-**Phase 3: Azure Key Vault Integration** ✅
-- Custom token credential wrapper (CachedTokenCredential)
-- List secrets from Azure Key Vault with pagination
-- List certificates from Azure Key Vault with pagination
-- KeyvaultName extraction from SecretProviderClass spec.parameters
-- Filter disabled secrets and certificates automatically
-- Comprehensive logging of discovered vault contents
-- Error handling with retry logic (5 attempts with exponential backoff)
+## Features
 
-**Phase 4: SecretProviderClass Updates** ✅
-- Automatic `objects` array population from vault contents
-- Automatic `secretObjects` generation for Kubernetes Secrets
-- JSON Patch updates with last-sync timestamp annotation
-- Change detection to avoid unnecessary updates
-- Field removal when annotations disabled
-- Vault as source of truth (no merge logic)
-- Immediate event-driven reconciliation via work queue
+**Production Ready** ✅
 
-**Work Queue Architecture** ✅
-- Industry-standard Kubernetes controller pattern
-- 5 concurrent workers with rate limiting
-- Automatic event deduplication
-- Retry logic with exponential backoff (max 5 attempts)
-- Graceful error handling (one failed resource doesn't block others)
-- No race conditions or reconciliation loops
+**Core Capabilities:**
+- **Automatic Vault Sync** - Discovers and syncs all enabled secrets/certificates from Azure Key Vault
+- **Kubernetes Secret Generation** - Optionally creates Kubernetes Secrets (Opaque and TLS types)
+- **Service Account Impersonation** - Uses existing Azure Workload Identity, no centralized credentials
+- **Event-Driven Reconciliation** - Immediate updates via work queue (no waiting for periodic sync)
+- **Robust Error Handling** - Retry logic with exponential backoff, preserves data on permission errors
+- **Zero Configuration** - Just add annotations, vault is the source of truth
+
+**Technical Highlights:**
+- Work queue pattern with 5 concurrent workers and rate limiting
+- Token caching with automatic renewal (K8s + Azure AD tokens)
+- JSON Patch updates with change detection
+- Comprehensive logging and observability
+- Multi-vault support per service account
+
+**Implementation Phases:**
+- ✅ Phase 1: Foundation (watching, caching, work queue)
+- ✅ Phase 2: Token acquisition (K8s + Azure AD via Workload Identity)
+- ✅ Phase 3: Azure Key Vault integration (secrets + certificates)
+- ✅ Phase 4: SecretProviderClass updates (objects + secretObjects)
+
+See [ROADMAP.md](ROADMAP.md) for detailed implementation history.
 
 ## Architecture
 
@@ -284,6 +285,11 @@ Network issues, temporary token problems, etc.:
 ├── deploy/                                   # Deployment manifests
 │   ├── deployment.yaml                       # Controller deployment
 │   └── rbac.yaml                             # RBAC permissions
+├── examples/                                 # Usage examples
+│   ├── basic-sync.yaml                       # Minimal configuration
+│   ├── with-secrets.yaml                     # With Kubernetes Secret generation
+│   ├── full-example.yaml                     # Complete example with Pod
+│   └── README.md                             # Examples documentation
 ├── planning/                                 # Implementation plans
 │   ├── architecture-improvements.md          # Work queue implementation
 │   ├── secretproviderclass-updates.md        # Phase 4 implementation
@@ -298,6 +304,8 @@ Network issues, temporary token problems, etc.:
 ├── azure.go                                  # Azure AD token exchange
 ├── vault.go                                  # Azure Key Vault integration
 ├── update.go                                 # SecretProviderClass patching
+├── Dockerfile                                # Container image build
+├── Makefile                                  # Build automation
 ├── CHANGELOG.md                              # Development history
 ├── LICENSE                                   # MIT License
 ├── README.md                                 # This file
@@ -385,20 +393,20 @@ If `secretObjects` annotation is enabled but no Secrets created:
 
 ### GitHub Container Registry (Public)
 
-Pre-built container images are available from GitHub Container Registry:
+Pre-built container images are automatically built and published to GitHub Container Registry:
 
 ```bash
 # Pull latest image
 docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
 
-# Pull specific version
-docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:v1.0.0
+# Pull specific commit
+docker pull ghcr.io/jeanhaley32/azure-keyvault-sync-controller:main-<sha>
 ```
 
 **Available tags:**
-- `latest` - Latest build from main branch
-- `v1.0.0`, `v1.0`, `v1` - Semantic version tags
+- `latest` - Latest successful build from main branch
 - `main-<sha>` - Specific commit builds
+- Semantic version tags (e.g., `v1.0.0`) will be created when releases are tagged
 
 **Platforms:**
 - linux/amd64
