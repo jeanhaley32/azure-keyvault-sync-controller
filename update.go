@@ -1,20 +1,18 @@
 package main
 
 import (
-	"log/slog"
 	"context"
 	"encoding/json"
 	"fmt"
-	
+	"log/slog"
 	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
-
-	"gopkg.in/yaml.v3"
 )
 
 // VaultObject represents a single object in the SecretProviderClass objects array
@@ -92,8 +90,11 @@ func DetectChanges(current string, new string) bool {
 	changed := currentNorm != newNorm
 
 	if changed {
-		slog.Debug("Change detected in objects",
+		slog.Debug("Objects changed",
 			"currentLength", len(currentNorm), "newLength", len(newNorm))
+	} else {
+		slog.Debug("Objects unchanged",
+			"length", len(currentNorm))
 	}
 
 	return changed
@@ -186,7 +187,7 @@ func CompareSecretObjects(obj *secretsstorev1.SecretProviderClass, generated []*
 		return false
 	}
 
-	existingMap := make(map[string]*secretsstorev1.SecretObject)
+	existingMap := make(map[string]*secretsstorev1.SecretObject, len(existingObjects))
 	for _, o := range existingObjects {
 		existingMap[o.SecretName] = o
 	}

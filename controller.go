@@ -362,13 +362,18 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 		if CompareSecretObjects(obj, generatedSecretObjects) {
 			secretObjectsToSync = generatedSecretObjects
 			secretObjectsChanged = true
+			slog.Info("SecretObjects changed", "namespace", namespace, "name", name, "existingCount", len(obj.Spec.SecretObjects), "generatedCount", len(generatedSecretObjects))
+		} else {
+			slog.Info("SecretObjects unchanged", "namespace", namespace, "name", name, "count", len(generatedSecretObjects))
 		}
 	} else {
 		// Check if field exists and needs removal
 		if len(obj.Spec.SecretObjects) > 0 {
 			secretObjectsToSync = "REMOVE_FIELD"
 			secretObjectsChanged = true
-			slog.Info("Clearing secretObjects field", "namespace", namespace, "name", name)
+			slog.Info("Clearing secretObjects field", "namespace", namespace, "name", name, "existingCount", len(obj.Spec.SecretObjects))
+		} else {
+			slog.Debug("SecretObjects already empty", "namespace", namespace, "name", name)
 		}
 	}
 
@@ -377,13 +382,16 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 	objectsChanged := DetectChanges(currentObjects, newObjects)
 
 	if !objectsChanged && !secretObjectsChanged {
-		slog.Debug("No changes detected", "namespace", namespace, "name", name)
+		slog.Info("No changes detected - skipping patch",
+			"namespace", namespace, "name", name,
+			"objectsChanged", objectsChanged,
+			"secretObjectsChanged", secretObjectsChanged)
 		return nil
 	}
 
 	// Patch the resource
 	timestamp := time.Now().Format(time.RFC3339)
-	slog.Info("Applying updates",
+	slog.Info("Changes detected - applying patch",
 		    "namespace", namespace, "name", name, "objectsChanged", objectsChanged, "secretObjectsChanged", secretObjectsChanged)
 	err = PatchSecretProviderClass(
 		ctrl.ctx,
