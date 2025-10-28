@@ -44,6 +44,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Apply Kubernetes API rate limits
+	config.QPS = cfg.KubernetesQPS
+	config.Burst = cfg.KubernetesBurst
+	slog.Info("Kubernetes API rate limits configured",
+		"qps", cfg.KubernetesQPS,
+		"burst", cfg.KubernetesBurst)
+
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		slog.Error("Error creating dynamic client", "error", err)
