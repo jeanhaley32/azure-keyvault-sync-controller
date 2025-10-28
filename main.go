@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -79,9 +83,41 @@ func main() {
 	go func() {
 		if err := StartHealthCheckServer(healthAddr, controller.healthChecker); err != nil {
 			slog.Error("Health check server failed", "error", err)
-			os.Exit(1) 
+			os.Exit(1)
 		}
 	}()
 
-	controller.Run()
+	// Setup signal handling for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	// Start controller in goroutine
+	controllerDone := make(chan struct{})
+	go func() {
+		defer close(controllerDone)
+		controller.Run(ctx)
+	}()
+
+	// Wait for shutdown signal
+	sig := <-sigChan
+	slog.Info("Received shutdown signal", "signal", sig.String())
+
+	// Cancel context to trigger graceful shutdown
+	cancel()
+
+	// Wait for controller to finish with timeout
+	shutdownTimeout := 30 * time.Second
+	slog.Info("Waiting for graceful shutdown", "timeout", shutdownTimeout)
+
+	select {
+	case <-controllerDone:
+		slog.Info("Controller shutdown complete")
+	case <-time.After(shutdownTimeout):
+		slog.Warn("Shutdown timeout exceeded, forcing exit")
+	}
+
+	slog.Info("Shutdown complete")
 }
