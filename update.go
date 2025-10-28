@@ -1,21 +1,18 @@
 package main
 
 import (
-	"log/slog"
 	"context"
 	"encoding/json"
 	"fmt"
-	
+	"log/slog"
 	"sort"
 	"strings"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
-
 	"gopkg.in/yaml.v3"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
+	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 )
 
 // VaultObject represents a single object in the SecretProviderClass objects array
@@ -28,19 +25,6 @@ type VaultObject struct {
 // ObjectsSpec represents the full objects structure for Azure provider
 type ObjectsSpec struct {
 	Array []VaultObject `yaml:"array"`
-}
-
-// SecretObject represents a Kubernetes Secret to be created from vault contents
-type SecretObject struct {
-	SecretName string              `json:"secretName" yaml:"secretName"`
-	Type       string              `json:"type" yaml:"type"`
-	Data       []SecretObjectData  `json:"data" yaml:"data"`
-}
-
-// SecretObjectData represents the data mapping for a Kubernetes Secret
-type SecretObjectData struct {
-	Key        string `json:"key" yaml:"key"`
-	ObjectName string `json:"objectName" yaml:"objectName"`
 }
 
 // GenerateObjectsFromVault converts discovered vault items to VaultObject structs
@@ -106,8 +90,11 @@ func DetectChanges(current string, new string) bool {
 	changed := currentNorm != newNorm
 
 	if changed {
-		slog.Debug("Change detected in objects",
+		slog.Debug("Objects changed",
 			"currentLength", len(currentNorm), "newLength", len(newNorm))
+	} else {
+		slog.Debug("Objects unchanged",
+			"length", len(currentNorm))
 	}
 
 	return changed
@@ -116,10 +103,9 @@ func DetectChanges(current string, new string) bool {
 // PatchSecretProviderClass applies JSON Patch to update SecretProviderClass
 func PatchSecretProviderClass(
 	ctx context.Context,
-	client dynamic.Interface,
+	client spcclient.Interface,
 	namespace string,
 	name string,
-	gvr schema.GroupVersionResource,
 	objectsYAML string,
 	secretObjects interface{},
 	timestamp string,
@@ -171,7 +157,7 @@ func PatchSecretProviderClass(
 	slog.Debug("Applying JSON Patch", "namespace", namespace, "name", name, "patch", string(patchBytes))
 
 	// Apply the patch
-	_, err = client.Resource(gvr).Namespace(namespace).Patch(
+	_, err = client.SecretsstoreV1().SecretProviderClasses(namespace).Patch(
 		ctx,
 		name,
 		types.JSONPatchType,
@@ -189,36 +175,31 @@ func PatchSecretProviderClass(
 
 // CompareSecretObjects compares existing secretObjects in the resource with generated ones
 // Returns true if they are different, false if identical
-func CompareSecretObjects(obj *unstructured.Unstructured, generated []SecretObject) bool {
-	// Extract existing secretObjects from spec
-	existingRaw, found, err := unstructured.NestedSlice(obj.Object, "spec", "secretObjects")
-	if err != nil || !found {
-		// No existing secretObjects, different if we have generated ones
-		return len(generated) > 0
-	}
+func CompareSecretObjects(obj *secretsstorev1.SecretProviderClass, generated []*secretsstorev1.SecretObject) bool {
+	existingObjects := obj.Spec.SecretObjects
 
-	// Check count first
-	if len(existingRaw) != len(generated) {
-		slog.Debug("SecretObjects count changed", "existing", len(existingRaw), "generated", len(generated))
+	if len(existingObjects) != len(generated) {
+		slog.Debug("SecretObjects count changed", "existing", len(existingObjects), "generated", len(generated))
 		return true
 	}
 
-	// Convert existing to SecretObject structs for deep comparison
-	var existingObjects []SecretObject
-	existingJSON, err := json.Marshal(existingRaw)
-	if err != nil {
-		return true
+	if len(existingObjects) == 0 {
+		return false
 	}
 
-	err = json.Unmarshal(existingJSON, &existingObjects)
-	if err != nil {
-		return true
+	existingMap := make(map[string]*secretsstorev1.SecretObject, len(existingObjects))
+	for _, o := range existingObjects {
+		existingMap[o.SecretName] = o
 	}
 
-	// Compare each object
-	for i := range generated {
-		if !secretObjectsEqual(existingObjects[i], generated[i]) {
-			slog.Debug("SecretObject changed", "index", i)
+	for _, gen := range generated {
+		exist, ok := existingMap[gen.SecretName]
+		if !ok {
+			slog.Debug("Generated SecretObject not found in existing objects", "secretName", gen.SecretName)
+			return true
+		}
+		if !secretObjectsEqual(exist, gen) {
+			slog.Debug("SecretObject content has changed", "secretName", gen.SecretName)
 			return true
 		}
 	}
@@ -227,13 +208,30 @@ func CompareSecretObjects(obj *unstructured.Unstructured, generated []SecretObje
 }
 
 // secretObjectsEqual compares two SecretObject structs for equality
-func secretObjectsEqual(a, b SecretObject) bool {
-	if a.SecretName != b.SecretName || a.Type != b.Type || len(a.Data) != len(b.Data) {
+func secretObjectsEqual(a, b *secretsstorev1.SecretObject) bool {
+	if a.SecretName != b.SecretName || a.Type != b.Type || len(a.Data) != len(b.Data) || len(a.Labels) != len(b.Labels) {
 		return false
 	}
 
-	for i := range a.Data {
-		if a.Data[i].Key != b.Data[i].Key || a.Data[i].ObjectName != b.Data[i].ObjectName {
+	// Compare Labels
+	for k, v := range a.Labels {
+		if b.Labels[k] != v {
+			return false
+		}
+	}
+
+	if len(a.Data) == 0 {
+		return true
+	}
+
+	aDataMap := make(map[string]string)
+	for _, d := range a.Data {
+		aDataMap[d.Key] = d.ObjectName
+	}
+
+	for _, d := range b.Data {
+		objName, ok := aDataMap[d.Key]
+		if !ok || objName != d.ObjectName {
 			return false
 		}
 	}
@@ -243,16 +241,16 @@ func secretObjectsEqual(a, b SecretObject) bool {
 
 // GenerateSecretObjectsFromVault creates SecretObject entries for vault secrets and certificates
 // Vault is the source of truth - no merging with existing secretObjects
-func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecrets bool, enableCerts bool) []SecretObject {
-	var secretObjects []SecretObject
+func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecrets bool, enableCerts bool) []*secretsstorev1.SecretObject {
+	var secretObjects []*secretsstorev1.SecretObject
 
 	// Add secrets (type: Opaque) if enabled
 	if enableSecrets {
 		for _, secretName := range secrets {
-			secretObjects = append(secretObjects, SecretObject{
+			secretObjects = append(secretObjects, &secretsstorev1.SecretObject{
 				SecretName: secretName,
 				Type:       "Opaque",
-				Data: []SecretObjectData{
+				Data: []*secretsstorev1.SecretObjectData{
 					{
 						Key:        secretName,
 						ObjectName: secretName,
@@ -266,10 +264,10 @@ func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecr
 	// Add certificates (type: kubernetes.io/tls) if enabled
 	if enableCerts {
 		for _, certName := range certs {
-			secretObjects = append(secretObjects, SecretObject{
+			secretObjects = append(secretObjects, &secretsstorev1.SecretObject{
 				SecretName: certName,
 				Type:       "kubernetes.io/tls",
-				Data: []SecretObjectData{
+				Data: []*secretsstorev1.SecretObjectData{
 					{
 						Key:        "tls.key",
 						ObjectName: certName,
