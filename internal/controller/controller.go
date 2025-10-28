@@ -1,4 +1,4 @@
-package main
+package controller
 
 import (
 	"context"
@@ -7,6 +7,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/cache"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/circuitbreaker"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/config"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/health"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/token"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/update"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/watch"
@@ -73,19 +80,19 @@ func isValidForSync(obj *secretsstorev1.SecretProviderClass) (bool, string) {
 type Controller struct {
 	client              spcclient.Interface
 	clientset           kubernetes.Interface
-	cache               *SecretProviderClassCache
-	tokenCache          *TokenCache
-	azureTokenCache     *AzureTokenCache
+	cache               *cache.SecretProviderClassCache
+	tokenCache          *token.TokenCache
+	azureTokenCache     *azure.AzureTokenCache
 	queue               workqueue.TypedRateLimitingInterface[QueueKey]
-	healthChecker       *HealthChecker
-	config              *Config
+	HealthChecker       *health.HealthChecker
+	config              *config.Config
 	watchNamespace      string          // Empty = cluster-wide, set = namespace-scoped
-	azureCircuitBreaker *CircuitBreaker // Protects against Azure API failures
+	azureCircuitBreaker *circuitbreaker.CircuitBreaker // Protects against Azure API failures
 }
 
-func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *Config, watchNamespace string) *Controller {
+func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *config.Config, watchNamespace string) *Controller {
 	// Initialize circuit breaker for Azure API protection
-	azureCB := NewCircuitBreaker(
+	azureCB := circuitbreaker.NewCircuitBreaker(
 		config.AzureCircuitBreakerThreshold,
 		config.AzureCircuitBreakerTimeout,
 	)
@@ -97,11 +104,11 @@ func NewController(client spcclient.Interface, clientset kubernetes.Interface, c
 	return &Controller{
 		client:              client,
 		clientset:           clientset,
-		cache:               NewCache(),
-		tokenCache:          NewTokenCache(),
-		azureTokenCache:     NewAzureTokenCache(),
+		cache:               cache.NewCache(),
+		tokenCache:          token.NewTokenCache(),
+		azureTokenCache:     azure.NewAzureTokenCache(),
 		queue:               workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
-		healthChecker:       NewHealthChecker(),
+		HealthChecker:       health.NewHealthChecker(),
 		config:              config,
 		watchNamespace:      watchNamespace,
 		azureCircuitBreaker: azureCB,
@@ -275,7 +282,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	var secrets []string
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		secrets, listErr = ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
+		secrets, listErr = azure.ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -302,7 +309,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	var certificates []string
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		certificates, listErr = ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
+		certificates, listErr = azure.ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -329,10 +336,10 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Updating SecretProviderClass", "namespace", namespace, "name", name)
 
 	// Generate objects from vault (vault is source of truth)
-	discoveredObjects := GenerateObjectsFromVault(secrets, certificates)
+	discoveredObjects := update.GenerateObjectsFromVault(secrets, certificates)
 
 	// Format as YAML
-	newObjects, err := FormatObjectsYAML(discoveredObjects)
+	newObjects, err := update.FormatObjectsYAML(discoveredObjects)
 	if err != nil {
 		return fmt.Errorf("error formatting objects: %w", err)
 	}
@@ -349,7 +356,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 			"namespace", namespace, "name", name, "generateSecrets", enableSecretObjects, "generateCerts", enableCertObjects)
 
 		// Generate secretObjects from vault + annotations
-		generatedSecretObjects := GenerateSecretObjectsFromVault(
+		generatedSecretObjects := update.GenerateSecretObjectsFromVault(
 			secrets,
 			certificates,
 			enableSecretObjects,
@@ -357,7 +364,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		)
 
 		// Check if secretObjects actually changed
-		if CompareSecretObjects(obj, generatedSecretObjects) {
+		if update.CompareSecretObjects(obj, generatedSecretObjects) {
 			secretObjectsToSync = generatedSecretObjects
 			secretObjectsChanged = true
 			slog.Info("SecretObjects changed", "namespace", namespace, "name", name, "existingCount", len(obj.Spec.SecretObjects), "generatedCount", len(generatedSecretObjects))
@@ -377,7 +384,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 
 	// Check if update needed
 	currentObjects := obj.Spec.Parameters["objects"]
-	objectsChanged := DetectChanges(currentObjects, newObjects)
+	objectsChanged := update.DetectChanges(currentObjects, newObjects)
 
 	if !objectsChanged && !secretObjectsChanged {
 		slog.Info("No changes detected - skipping patch",
@@ -391,7 +398,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	timestamp := time.Now().Format(time.RFC3339)
 	slog.Info("Changes detected - applying patch",
 		    "namespace", namespace, "name", name, "objectsChanged", objectsChanged, "secretObjectsChanged", secretObjectsChanged)
-	err = PatchSecretProviderClass(
+	err = update.PatchSecretProviderClass(
 		ctx,
 		ctrl.client,
 		namespace,
@@ -595,7 +602,7 @@ func (ctrl *Controller) Run(ctx context.Context) {
 	for range ctrl.config.WorkerCount {
 		go ctrl.worker(ctx)
 	}
-	ctrl.healthChecker.SetWorkersRunning(true)
+	ctrl.HealthChecker.SetWorkersRunning(true)
 
 	if ctrl.watchNamespace != "" {
 		slog.Info("Watching for events", "namespace", ctrl.watchNamespace)
@@ -608,8 +615,8 @@ func (ctrl *Controller) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			slog.Info("Shutdown signal received, stopping watch loop")
-			ctrl.healthChecker.SetWorkersRunning(false)
-			ctrl.healthChecker.SetWatchConnected(false)
+			ctrl.HealthChecker.SetWorkersRunning(false)
+			ctrl.HealthChecker.SetWatchConnected(false)
 			ctrl.drainQueue()
 			return
 		default:
@@ -620,20 +627,20 @@ func (ctrl *Controller) Run(ctx context.Context) {
 			// Check if error is due to context cancellation
 			if ctx.Err() != nil {
 				slog.Info("Watch cancelled due to shutdown")
-				ctrl.healthChecker.SetWorkersRunning(false)
-				ctrl.healthChecker.SetWatchConnected(false)
+				ctrl.HealthChecker.SetWorkersRunning(false)
+				ctrl.HealthChecker.SetWatchConnected(false)
 				ctrl.drainQueue()
 				return
 			}
 
 			slog.Error("Error creating watcher", "error", err)
-			ctrl.healthChecker.SetWatchConnected(false)
+			ctrl.HealthChecker.SetWatchConnected(false)
 			time.Sleep(retryDelay)
 			continue
 		}
 
 		// Mark watch as connected
-		ctrl.healthChecker.SetWatchConnected(true)
+		ctrl.HealthChecker.SetWatchConnected(true)
 		slog.Info("Watch connected successfully")
 
 		// Watch loop with context cancellation check
@@ -643,8 +650,8 @@ func (ctrl *Controller) Run(ctx context.Context) {
 			case <-ctx.Done():
 				slog.Info("Shutdown signal received, stopping watch")
 				watcher.Stop()
-				ctrl.healthChecker.SetWorkersRunning(false)
-				ctrl.healthChecker.SetWatchConnected(false)
+				ctrl.HealthChecker.SetWorkersRunning(false)
+				ctrl.HealthChecker.SetWatchConnected(false)
 				ctrl.drainQueue()
 				return
 			case event, ok := <-watcher.ResultChan():
@@ -653,19 +660,19 @@ func (ctrl *Controller) Run(ctx context.Context) {
 					break watchLoop
 				}
 				ctrl.handleEvent(event)
-				ctrl.healthChecker.UpdateWatchActivity()
+				ctrl.HealthChecker.UpdateWatchActivity()
 			}
 		}
 
 		slog.Info("Watch connection closed, reconnecting", "delay", "5s")
-		ctrl.healthChecker.SetWatchConnected(false)
+		ctrl.HealthChecker.SetWatchConnected(false)
 		watcher.Stop()
 
 		// Check context before sleeping
 		select {
 		case <-ctx.Done():
 			slog.Info("Shutdown during reconnect delay")
-			ctrl.healthChecker.SetWorkersRunning(false)
+			ctrl.HealthChecker.SetWorkersRunning(false)
 			ctrl.drainQueue()
 			return
 		case <-time.After(retryDelay):

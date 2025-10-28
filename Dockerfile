@@ -10,7 +10,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
-COPY *.go ./
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 
 # Build the controller
 # CGO_ENABLED=0 for static binary
@@ -20,7 +21,7 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s" \
     -o azure-keyvault-sync-controller \
-    .
+    ./cmd/controller
 
 # Runtime stage - distroless for minimal attack surface
 FROM gcr.io/distroless/static:nonroot

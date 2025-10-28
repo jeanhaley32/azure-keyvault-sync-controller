@@ -26,3 +26,4 @@ azure-keyvault-sync-controller
 
 # OS files
 .DS_Store
+/controller
