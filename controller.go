@@ -77,7 +77,6 @@ type Controller struct {
 	tokenCache          *TokenCache
 	azureTokenCache     *AzureTokenCache
 	queue               workqueue.TypedRateLimitingInterface[QueueKey]
-	ctx                 context.Context
 	healthChecker       *HealthChecker
 	config              *Config
 	watchNamespace      string          // Empty = cluster-wide, set = namespace-scoped
@@ -102,7 +101,6 @@ func NewController(client spcclient.Interface, clientset kubernetes.Interface, c
 		tokenCache:          NewTokenCache(),
 		azureTokenCache:     NewAzureTokenCache(),
 		queue:               workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
-		ctx:                 context.Background(),
 		healthChecker:       NewHealthChecker(),
 		config:              config,
 		watchNamespace:      watchNamespace,
@@ -204,7 +202,7 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 }
 
 // reconcileResource performs vault discovery and SecretProviderClass update for a single resource
-func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClass) error {
+func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstorev1.SecretProviderClass) error {
 	namespace := obj.Namespace
 	name := obj.Name
 
@@ -225,7 +223,7 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 
 	// Get Kubernetes token
 	token, err := ctrl.tokenCache.GetToken(
-		ctrl.ctx,
+		ctx,
 		ctrl.clientset,
 		namespace,
 		serviceAccount,
@@ -249,7 +247,7 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 
 	// Get Azure AD token
 	azureToken, azureTokenExpiration, err := ctrl.azureTokenCache.GetToken(
-		ctrl.ctx,
+		ctx,
 		namespace,
 		serviceAccount,
 		token,
@@ -277,7 +275,7 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 	var secrets []string
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		secrets, listErr = ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+		secrets, listErr = ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -304,7 +302,7 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 	var certificates []string
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		certificates, listErr = ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+		certificates, listErr = ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -394,7 +392,7 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 	slog.Info("Changes detected - applying patch",
 		    "namespace", namespace, "name", name, "objectsChanged", objectsChanged, "secretObjectsChanged", secretObjectsChanged)
 	err = PatchSecretProviderClass(
-		ctrl.ctx,
+		ctx,
 		ctrl.client,
 		namespace,
 		name,
@@ -413,7 +411,7 @@ func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClas
 }
 
 // enqueueAll enqueues all valid resources for reconciliation
-func (ctrl *Controller) enqueueAll() {
+func (ctrl *Controller) enqueueAll(ctx context.Context) {
 	if ctrl.watchNamespace != "" {
 		slog.Info("Periodic resync starting", "namespace", ctrl.watchNamespace)
 	} else {
@@ -421,7 +419,7 @@ func (ctrl *Controller) enqueueAll() {
 	}
 
 	result, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(ctrl.watchNamespace).List(
-		ctrl.ctx, metav1.ListOptions{},
+		ctx, metav1.ListOptions{},
 	)
 	if err != nil {
 		slog.Error("Error listing resources for resync", "error", err)
@@ -441,28 +439,69 @@ func (ctrl *Controller) enqueueAll() {
 	slog.Info("Periodic resync complete", "enqueuedCount", enqueuedCount)
 }
 
-func (ctrl *Controller) syncCache() {
+func (ctrl *Controller) syncCache(ctx context.Context) {
 	slog.Info("Performing initial sync")
 	// Use enqueueAll for initial sync as well
-	ctrl.enqueueAll()
+	ctrl.enqueueAll(ctx)
 }
 
-func (ctrl *Controller) startPeriodicResync() {
+func (ctrl *Controller) startPeriodicResync(ctx context.Context) {
 	ticker := time.NewTicker(ctrl.config.SyncInterval)
 	defer ticker.Stop()
-	for range ticker.C {
-		ctrl.enqueueAll()
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Periodic resync stopped due to shutdown")
+			return
+		case <-ticker.C:
+			ctrl.enqueueAll(ctx)
+		}
 	}
 }
 
 // worker processes items from the work queue
-func (ctrl *Controller) worker() {
-	for ctrl.processNextItem() {
+func (ctrl *Controller) worker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Debug("Worker stopping due to shutdown")
+			return
+		default:
+			if !ctrl.processNextItem(ctx) {
+				return
+			}
+		}
+	}
+}
+
+// drainQueue waits for the work queue to be drained with a timeout
+func (ctrl *Controller) drainQueue() {
+	drainTimeout := 20 * time.Second
+	slog.Info("Draining work queue", "timeout", drainTimeout, "queueLength", ctrl.queue.Len())
+
+	deadline := time.Now().Add(drainTimeout)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for time.Now().Before(deadline) {
+		queueLen := ctrl.queue.Len()
+		if queueLen == 0 {
+			slog.Info("Work queue successfully drained")
+			return
+		}
+
+		slog.Debug("Waiting for queue to drain", "remainingItems", queueLen)
+		<-ticker.C
+	}
+
+	remainingItems := ctrl.queue.Len()
+	if remainingItems > 0 {
+		slog.Warn("Queue drain timeout exceeded", "remainingItems", remainingItems)
 	}
 }
 
 // processNextItem processes a single item from the work queue
-func (ctrl *Controller) processNextItem() bool {
+func (ctrl *Controller) processNextItem(ctx context.Context) bool {
 	// Get next item from queue
 	key, shutdown := ctrl.queue.Get()
 	if shutdown {
@@ -471,7 +510,7 @@ func (ctrl *Controller) processNextItem() bool {
 	defer ctrl.queue.Done(key)
 
 	// Reconcile
-	err := ctrl.reconcile(key)
+	err := ctrl.reconcile(ctx, key)
 
 	// Handle result with retry logic
 	ctrl.handleReconcileResult(key, err)
@@ -502,7 +541,7 @@ func (ctrl *Controller) handleReconcileResult(key QueueKey, err error) {
 }
 
 // reconcile performs the actual reconciliation for a queue item
-func (ctrl *Controller) reconcile(key QueueKey) error {
+func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 	// Parse key
 	namespace, name, err := parseKey(key)
 	if err != nil {
@@ -511,7 +550,7 @@ func (ctrl *Controller) reconcile(key QueueKey) error {
 
 	// Get resource from Kubernetes
 	obj, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Get(
-		ctrl.ctx, name, metav1.GetOptions{},
+		ctx, name, metav1.GetOptions{},
 	)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -531,7 +570,7 @@ func (ctrl *Controller) reconcile(key QueueKey) error {
 	}
 
 	// Perform reconciliation
-	err = ctrl.reconcileResource(obj)
+	err = ctrl.reconcileResource(ctx, obj)
 	if err != nil {
 		return fmt.Errorf("reconciliation failed: %w", err)
 	}
@@ -542,19 +581,19 @@ func (ctrl *Controller) reconcile(key QueueKey) error {
 	return nil
 }
 
-func (ctrl *Controller) Run() {
+func (ctrl *Controller) Run(ctx context.Context) {
 	defer ctrl.queue.ShutDown()
 
-	ctrl.syncCache()
+	ctrl.syncCache(ctx)
 	ctrl.printCache()
 
 	// Start periodic resync
-	go ctrl.startPeriodicResync()
+	go ctrl.startPeriodicResync(ctx)
 
 	// Start worker pool
 	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)
 	for range ctrl.config.WorkerCount {
-		go ctrl.worker()
+		go ctrl.worker(ctx)
 	}
 	ctrl.healthChecker.SetWorkersRunning(true)
 
@@ -565,8 +604,28 @@ func (ctrl *Controller) Run() {
 	}
 
 	for {
-		watcher, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(ctrl.watchNamespace).Watch(ctrl.ctx, metav1.ListOptions{})
+		// Check if context is cancelled before creating watcher
+		select {
+		case <-ctx.Done():
+			slog.Info("Shutdown signal received, stopping watch loop")
+			ctrl.healthChecker.SetWorkersRunning(false)
+			ctrl.healthChecker.SetWatchConnected(false)
+			ctrl.drainQueue()
+			return
+		default:
+		}
+
+		watcher, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(ctrl.watchNamespace).Watch(ctx, metav1.ListOptions{})
 		if err != nil {
+			// Check if error is due to context cancellation
+			if ctx.Err() != nil {
+				slog.Info("Watch cancelled due to shutdown")
+				ctrl.healthChecker.SetWorkersRunning(false)
+				ctrl.healthChecker.SetWatchConnected(false)
+				ctrl.drainQueue()
+				return
+			}
+
 			slog.Error("Error creating watcher", "error", err)
 			ctrl.healthChecker.SetWatchConnected(false)
 			time.Sleep(retryDelay)
@@ -577,14 +636,39 @@ func (ctrl *Controller) Run() {
 		ctrl.healthChecker.SetWatchConnected(true)
 		slog.Info("Watch connected successfully")
 
-		for event := range watcher.ResultChan() {
-			ctrl.handleEvent(event)
-			ctrl.healthChecker.UpdateWatchActivity()
+		// Watch loop with context cancellation check
+	watchLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("Shutdown signal received, stopping watch")
+				watcher.Stop()
+				ctrl.healthChecker.SetWorkersRunning(false)
+				ctrl.healthChecker.SetWatchConnected(false)
+				ctrl.drainQueue()
+				return
+			case event, ok := <-watcher.ResultChan():
+				if !ok {
+					// Channel closed, reconnect
+					break watchLoop
+				}
+				ctrl.handleEvent(event)
+				ctrl.healthChecker.UpdateWatchActivity()
+			}
 		}
 
 		slog.Info("Watch connection closed, reconnecting", "delay", "5s")
 		ctrl.healthChecker.SetWatchConnected(false)
 		watcher.Stop()
-		time.Sleep(retryDelay)
+
+		// Check context before sleeping
+		select {
+		case <-ctx.Done():
+			slog.Info("Shutdown during reconnect delay")
+			ctrl.healthChecker.SetWorkersRunning(false)
+			ctrl.drainQueue()
+			return
+		case <-time.After(retryDelay):
+		}
 	}
 }
