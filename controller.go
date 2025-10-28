@@ -8,13 +8,12 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
+	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
+	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 )
 
 const (
@@ -45,24 +44,22 @@ func parseKey(key QueueKey) (namespace, name string, err error) {
 	return parts[0], parts[1], nil
 }
 
-func isSyncEnabled(obj *unstructured.Unstructured) bool {
-	annotations := obj.GetAnnotations()
-	if annotations == nil {
+func isSyncEnabled(obj *secretsstorev1.SecretProviderClass) bool {
+	if obj.Annotations == nil {
 		return false
 	}
-	return annotations[annotationEnabled] == annotationEnabledValue
+	return obj.Annotations[annotationEnabled] == annotationEnabledValue
 }
 
-func getServiceAccount(obj *unstructured.Unstructured) (string, bool) {
-	annotations := obj.GetAnnotations()
-	if annotations == nil {
+func getServiceAccount(obj *secretsstorev1.SecretProviderClass) (string, bool) {
+	if obj.Annotations == nil {
 		return "", false
 	}
-	sa, exists := annotations[annotationServiceAccount]
+	sa, exists := obj.Annotations[annotationServiceAccount]
 	return sa, exists
 }
 
-func isValidForSync(obj *unstructured.Unstructured) (bool, string) {
+func isValidForSync(obj *secretsstorev1.SecretProviderClass) (bool, string) {
 	if !isSyncEnabled(obj) {
 		return false, ""
 	}
@@ -74,13 +71,12 @@ func isValidForSync(obj *unstructured.Unstructured) (bool, string) {
 }
 
 type Controller struct {
-	client              dynamic.Interface
+	client              spcclient.Interface
 	clientset           kubernetes.Interface
 	cache               *SecretProviderClassCache
 	tokenCache          *TokenCache
 	azureTokenCache     *AzureTokenCache
 	queue               workqueue.TypedRateLimitingInterface[QueueKey]
-	gvr                 schema.GroupVersionResource
 	ctx                 context.Context
 	healthChecker       *HealthChecker
 	config              *Config
@@ -88,7 +84,7 @@ type Controller struct {
 	azureCircuitBreaker *CircuitBreaker // Protects against Azure API failures
 }
 
-func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config, watchNamespace string) *Controller {
+func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *Config, watchNamespace string) *Controller {
 	// Initialize circuit breaker for Azure API protection
 	azureCB := NewCircuitBreaker(
 		config.AzureCircuitBreakerThreshold,
@@ -106,11 +102,6 @@ func NewController(client dynamic.Interface, clientset kubernetes.Interface, con
 		tokenCache:          NewTokenCache(),
 		azureTokenCache:     NewAzureTokenCache(),
 		queue:               workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
-		gvr: schema.GroupVersionResource{
-			Group:    "secrets-store.csi.x-k8s.io",
-			Version:  "v1",
-			Resource: "secretproviderclasses",
-		},
 		ctx:                 context.Background(),
 		healthChecker:       NewHealthChecker(),
 		config:              config,
@@ -123,14 +114,14 @@ func (ctrl *Controller) printCache() {
 	objects := ctrl.cache.List()
 	fmt.Printf("\n--- Current SecretProviderClass objects: %d ---\n", len(objects))
 	for _, obj := range objects {
-		fmt.Printf("  %s/%s\n", obj.GetNamespace(), obj.GetName())
+		fmt.Printf("  %s/%s\n", obj.Namespace, obj.Name)
 	}
 	fmt.Println("---")
 }
 
-func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
-	namespace := obj.GetNamespace()
-	name := obj.GetName()
+func (ctrl *Controller) handleAdded(obj *secretsstorev1.SecretProviderClass) {
+	namespace := obj.Namespace
+	name := obj.Name
 
 	if valid, serviceAccount := isValidForSync(obj); valid {
 		slog.Info("Event: ADDED - enqueuing", "namespace", namespace, "name", name, "serviceAccount", serviceAccount)
@@ -145,9 +136,9 @@ func (ctrl *Controller) handleAdded(obj *unstructured.Unstructured) {
 	}
 }
 
-func (ctrl *Controller) handleModified(obj *unstructured.Unstructured) {
-	namespace := obj.GetNamespace()
-	name := obj.GetName()
+func (ctrl *Controller) handleModified(obj *secretsstorev1.SecretProviderClass) {
+	namespace := obj.Namespace
+	name := obj.Name
 	key := keyFor(namespace, name)
 
 	enabled := isSyncEnabled(obj)
@@ -187,14 +178,14 @@ func (ctrl *Controller) handleDeleted(namespace, name string, inCache bool) {
 }
 
 func (ctrl *Controller) handleEvent(event watch.Event) {
-	obj, ok := event.Object.(*unstructured.Unstructured)
+	obj, ok := event.Object.(*secretsstorev1.SecretProviderClass)
 	if !ok {
 		slog.Warn("Unexpected object type", "type", fmt.Sprintf("%T", event.Object))
 		return
 	}
 
-	namespace := obj.GetNamespace()
-	name := obj.GetName()
+	namespace := obj.Namespace
+	name := obj.Name
 	inCache := ctrl.cache.Has(namespace, name)
 
 	switch event.Type {
@@ -213,9 +204,9 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 }
 
 // reconcileResource performs vault discovery and SecretProviderClass update for a single resource
-func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error {
-	namespace := obj.GetNamespace()
-	name := obj.GetName()
+func (ctrl *Controller) reconcileResource(obj *secretsstorev1.SecretProviderClass) error {
+	namespace := obj.Namespace
+	name := obj.Name
 
 	// Get service account
 	serviceAccount, hasServiceAccount := getServiceAccount(obj)
@@ -224,9 +215,12 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	}
 
 	// Extract clientID from spec
-	clientID, err := ExtractClientID(obj)
-	if err != nil {
-		return fmt.Errorf("missing clientID: %w", err)
+	if obj.Spec.Parameters == nil {
+		return fmt.Errorf("spec.parameters is nil")
+	}
+	clientID, ok := obj.Spec.Parameters["clientID"]
+	if !ok {
+		return fmt.Errorf("missing clientID in spec.parameters")
 	}
 
 	// Get Kubernetes token
@@ -248,9 +242,9 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	slog.Debug("Kubernetes token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", tokenSnippet)
 
 	// Extract tenantID
-	tenantID, err := ExtractTenantID(obj)
-	if err != nil {
-		return fmt.Errorf("missing tenantID: %w", err)
+	tenantID, ok := obj.Spec.Parameters["tenantId"]
+	if !ok {
+		return fmt.Errorf("missing tenantId in spec.parameters")
 	}
 
 	// Get Azure AD token
@@ -274,9 +268,9 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	slog.Debug("Azure AD token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", azureTokenSnippet)
 
 	// Extract vault name
-	keyvaultName, err := ExtractKeyvaultName(obj)
-	if err != nil {
-		return fmt.Errorf("missing keyvaultName: %w", err)
+	keyvaultName, ok := obj.Spec.Parameters["keyvaultName"]
+	if !ok {
+		return fmt.Errorf("missing keyvaultName in spec.parameters")
 	}
 
 	// List secrets from vault (protected by circuit breaker)
@@ -348,7 +342,7 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	// Process secretObjects
 	var secretObjectsToSync interface{}
 	var secretObjectsChanged bool
-	annotations := obj.GetAnnotations()
+	annotations := obj.Annotations
 	enableSecretObjects := annotations != nil && annotations[annotationSecretObjects] == annotationEnabledValue
 	enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
 
@@ -371,8 +365,7 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		}
 	} else {
 		// Check if field exists and needs removal
-		existingSecretObjects, found, _ := unstructured.NestedSlice(obj.Object, "spec", "secretObjects")
-		if found && len(existingSecretObjects) > 0 {
+		if len(obj.Spec.SecretObjects) > 0 {
 			secretObjectsToSync = "REMOVE_FIELD"
 			secretObjectsChanged = true
 			slog.Info("Clearing secretObjects field", "namespace", namespace, "name", name)
@@ -380,7 +373,7 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 	}
 
 	// Check if update needed
-	currentObjects, _, _ := unstructured.NestedString(obj.Object, "spec", "parameters", "objects")
+	currentObjects := obj.Spec.Parameters["objects"]
 	objectsChanged := DetectChanges(currentObjects, newObjects)
 
 	if !objectsChanged && !secretObjectsChanged {
@@ -397,7 +390,6 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		ctrl.client,
 		namespace,
 		name,
-		ctrl.gvr,
 		newObjects,
 		secretObjectsToSync,
 		timestamp,
@@ -420,7 +412,7 @@ func (ctrl *Controller) enqueueAll() {
 		slog.Info("Periodic resync starting (cluster-wide)")
 	}
 
-	result, err := ctrl.client.Resource(ctrl.gvr).Namespace(ctrl.watchNamespace).List(
+	result, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(ctrl.watchNamespace).List(
 		ctrl.ctx, metav1.ListOptions{},
 	)
 	if err != nil {
@@ -429,9 +421,10 @@ func (ctrl *Controller) enqueueAll() {
 	}
 
 	enqueuedCount := 0
-	for _, item := range result.Items {
-		if valid, _ := isValidForSync(&item); valid {
-			key := keyFor(item.GetNamespace(), item.GetName())
+	for i := range result.Items {
+		item := &result.Items[i]
+		if valid, _ := isValidForSync(item); valid {
+			key := keyFor(item.Namespace, item.Name)
 			ctrl.queue.Add(key)
 			enqueuedCount++
 		}
@@ -509,7 +502,7 @@ func (ctrl *Controller) reconcile(key QueueKey) error {
 	}
 
 	// Get resource from Kubernetes
-	obj, err := ctrl.client.Resource(ctrl.gvr).Namespace(namespace).Get(
+	obj, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Get(
 		ctrl.ctx, name, metav1.GetOptions{},
 	)
 	if err != nil {
@@ -564,7 +557,7 @@ func (ctrl *Controller) Run() {
 	}
 
 	for {
-		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace(ctrl.watchNamespace).Watch(ctrl.ctx, metav1.ListOptions{})
+		watcher, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(ctrl.watchNamespace).Watch(ctrl.ctx, metav1.ListOptions{})
 		if err != nil {
 			slog.Error("Error creating watcher", "error", err)
 			ctrl.healthChecker.SetWatchConnected(false)

@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 )
 
 func main() {
@@ -51,9 +51,9 @@ func main() {
 		"qps", cfg.KubernetesQPS,
 		"burst", cfg.KubernetesBurst)
 
-	dynamicClient, err := dynamic.NewForConfig(config)
+	spcClientset, err := spcclient.NewForConfig(config)
 	if err != nil {
-		slog.Error("Error creating dynamic client", "error", err)
+		slog.Error("Error creating secrets store CSI client", "error", err)
 		os.Exit(1)
 	}
 
@@ -71,7 +71,7 @@ func main() {
 		slog.Info("Cluster-wide mode enabled (watching all namespaces)")
 	}
 
-	controller := NewController(dynamicClient, clientset, cfg, watchNamespace)
+	controller := NewController(spcClientset, clientset, cfg, watchNamespace)
 
 	// Start health check server
 	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
@@ -79,10 +79,9 @@ func main() {
 	go func() {
 		if err := StartHealthCheckServer(healthAddr, controller.healthChecker); err != nil {
 			slog.Error("Health check server failed", "error", err)
-			os.Exit(1)
+			os.Exit(1) 
 		}
 	}()
 
 	controller.Run()
 }
-
