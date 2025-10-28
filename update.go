@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
@@ -62,23 +61,40 @@ func GenerateObjectsFromVault(secrets []string, certs []string) []VaultObject {
 }
 
 // FormatObjectsYAML converts VaultObject slice to Azure provider YAML format
+// Returns YAML with literal block scalar format required by Azure CSI driver:
+// array:
+//   - |
+//     objectName: secret-name
+//     objectType: secret
+//     objectVersion: ""
 func FormatObjectsYAML(objects []VaultObject) (string, error) {
 	if len(objects) == 0 {
 		return "", nil
 	}
 
-	// Create ObjectsSpec
-	spec := ObjectsSpec{
-		Array: objects,
+	// Manually construct YAML with literal block scalars (|)
+	// The Azure CSI driver requires each array element to be a literal string,
+	// not a nested map structure
+	var sb strings.Builder
+	sb.WriteString("array:\n")
+
+	for _, obj := range objects {
+		// Start literal block scalar for this array element
+		sb.WriteString("  - |\n")
+
+		// Write object properties with 4-space indentation
+		sb.WriteString(fmt.Sprintf("    objectName: %s\n", obj.ObjectName))
+		sb.WriteString(fmt.Sprintf("    objectType: %s\n", obj.ObjectType))
+
+		// Always include objectVersion field (empty string for latest version)
+		if obj.ObjectVersion != "" {
+			sb.WriteString(fmt.Sprintf("    objectVersion: %s\n", obj.ObjectVersion))
+		} else {
+			sb.WriteString("    objectVersion: \"\"\n")
+		}
 	}
 
-	// Marshal to YAML
-	yamlBytes, err := yaml.Marshal(&spec)
-	if err != nil {
-		return "", fmt.Errorf("error marshaling objects to YAML: %w", err)
-	}
-
-	return string(yamlBytes), nil
+	return sb.String(), nil
 }
 
 // DetectChanges determines if objects have changed
