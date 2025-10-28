@@ -34,7 +34,7 @@ func InitLogger(cfg *Config) {
 	slog.SetDefault(logger)
 
 	logger.Info("Logger initialized",
-		"level", logLevel.String(),
+		"configuredLevel", logLevel.String(),
 		"format", logFormat)
 }
 
