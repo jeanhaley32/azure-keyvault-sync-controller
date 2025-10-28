@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 )
 
 func cacheKey(namespace, name string) string {
@@ -13,16 +13,16 @@ func cacheKey(namespace, name string) string {
 
 type SecretProviderClassCache struct {
 	mu      sync.RWMutex
-	objects map[string]*unstructured.Unstructured
+	objects map[string]*secretsstorev1.SecretProviderClass
 }
 
 func NewCache() *SecretProviderClassCache {
 	return &SecretProviderClassCache{
-		objects: make(map[string]*unstructured.Unstructured),
+		objects: make(map[string]*secretsstorev1.SecretProviderClass),
 	}
 }
 
-func (c *SecretProviderClassCache) Set(namespace, name string, obj *unstructured.Unstructured) {
+func (c *SecretProviderClassCache) Set(namespace, name string, obj *secretsstorev1.SecretProviderClass) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.objects[cacheKey(namespace, name)] = obj
@@ -41,10 +41,10 @@ func (c *SecretProviderClassCache) Has(namespace, name string) bool {
 	return exists
 }
 
-func (c *SecretProviderClassCache) List() []*unstructured.Unstructured {
+func (c *SecretProviderClassCache) List() []*secretsstorev1.SecretProviderClass {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	result := make([]*unstructured.Unstructured, 0, len(c.objects))
+	result := make([]*secretsstorev1.SecretProviderClass, 0, len(c.objects))
 	for _, obj := range c.objects {
 		result = append(result, obj)
 	}
