@@ -42,6 +42,14 @@ spec:
             #   value: "5"  # Number of concurrent workers (default: 5, range: 1-100)
             # - name: HEALTH_CHECK_PORT
             #   value: "8080"  # Health check server port (default: 8080)
+            # - name: KUBERNETES_QPS
+            #   value: "10.0"  # Kubernetes API queries per second (default: 10.0, range: 0-100)
+            # - name: KUBERNETES_BURST
+            #   value: "20"  # Kubernetes API burst allowance (default: 20, range: 1-200)
+            # - name: AZURE_CIRCUIT_BREAKER_THRESHOLD
+            #   value: "5"  # Failures before opening circuit (default: 5, range: 3-10)
+            # - name: AZURE_CIRCUIT_BREAKER_TIMEOUT
+            #   value: "1m"  # Wait time before retry after open (default: 1m, range: 30s-5m)
           resources:
             requests:
               memory: "64Mi"

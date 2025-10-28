@@ -24,6 +24,14 @@ type Config struct {
 	// Server configuration
 	HealthCheckPort int
 
+	// Kubernetes API rate limiting
+	KubernetesQPS   float32
+	KubernetesBurst int
+
+	// Azure circuit breaker configuration
+	AzureCircuitBreakerThreshold int
+	AzureCircuitBreakerTimeout   time.Duration
+
 	// Azure configuration
 	TokenAudience string
 	KeyVaultScope string
@@ -45,6 +53,14 @@ func LoadConfig() (*Config, error) {
 
 		// Server defaults
 		HealthCheckPort: parseIntEnv("HEALTH_CHECK_PORT", 8080),
+
+		// Kubernetes API rate limiting defaults
+		KubernetesQPS:   parseFloat32Env("KUBERNETES_QPS", 10.0),
+		KubernetesBurst: parseIntEnv("KUBERNETES_BURST", 20),
+
+		// Azure circuit breaker defaults
+		AzureCircuitBreakerThreshold: parseIntEnv("AZURE_CIRCUIT_BREAKER_THRESHOLD", 5),
+		AzureCircuitBreakerTimeout:   parseDurationEnv("AZURE_CIRCUIT_BREAKER_TIMEOUT", 1*time.Minute),
 
 		// Azure defaults (typically don't need to change these)
 		TokenAudience: getEnv("TOKEN_AUDIENCE", "api://AzureADTokenExchange"),
@@ -116,6 +132,24 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("HEALTH_CHECK_PORT must be between 1-65535, got: %d", c.HealthCheckPort)
 	}
 
+	// Validate Kubernetes API rate limits
+	if c.KubernetesQPS <= 0 || c.KubernetesQPS > 100 {
+		return fmt.Errorf("KUBERNETES_QPS must be between 0-100, got: %f", c.KubernetesQPS)
+	}
+	if c.KubernetesBurst < 1 || c.KubernetesBurst > 200 {
+		return fmt.Errorf("KUBERNETES_BURST must be between 1-200, got: %d", c.KubernetesBurst)
+	}
+
+	// Validate Azure circuit breaker configuration
+	if c.AzureCircuitBreakerThreshold < 3 || c.AzureCircuitBreakerThreshold > 10 {
+		return fmt.Errorf("AZURE_CIRCUIT_BREAKER_THRESHOLD must be between 3-10, got: %d",
+			c.AzureCircuitBreakerThreshold)
+	}
+	if c.AzureCircuitBreakerTimeout < 30*time.Second || c.AzureCircuitBreakerTimeout > 5*time.Minute {
+		return fmt.Errorf("AZURE_CIRCUIT_BREAKER_TIMEOUT must be between 30s-5m, got: %v",
+			c.AzureCircuitBreakerTimeout)
+	}
+
 	// Validate Azure configuration
 	if c.TokenAudience == "" {
 		return fmt.Errorf("TOKEN_AUDIENCE cannot be empty")
@@ -158,6 +192,15 @@ func parseFloatEnv(key string, defaultValue float64) float64 {
 	if value := os.Getenv(key); value != "" {
 		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
 			return parsed
+		}
+	}
+	return defaultValue
+}
+
+func parseFloat32Env(key string, defaultValue float32) float32 {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseFloat(value, 32); err == nil {
+			return float32(parsed)
 		}
 	}
 	return defaultValue
