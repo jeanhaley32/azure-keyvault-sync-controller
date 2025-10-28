@@ -84,9 +84,10 @@ type Controller struct {
 	ctx             context.Context
 	healthChecker   *HealthChecker
 	config          *Config
+	watchNamespace  string // Empty = cluster-wide, set = namespace-scoped
 }
 
-func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config) *Controller {
+func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config, watchNamespace string) *Controller {
 	return &Controller{
 		client:          client,
 		clientset:       clientset,
@@ -99,9 +100,10 @@ func NewController(client dynamic.Interface, clientset kubernetes.Interface, con
 			Version:  "v1",
 			Resource: "secretproviderclasses",
 		},
-		ctx:           context.Background(),
-		healthChecker: NewHealthChecker(),
-		config:        config,
+		ctx:            context.Background(),
+		healthChecker:  NewHealthChecker(),
+		config:         config,
+		watchNamespace: watchNamespace,
 	}
 }
 
@@ -372,9 +374,13 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 
 // enqueueAll enqueues all valid resources for reconciliation
 func (ctrl *Controller) enqueueAll() {
-	slog.Info("Periodic resync starting")
+	if ctrl.watchNamespace != "" {
+		slog.Info("Periodic resync starting", "namespace", ctrl.watchNamespace)
+	} else {
+		slog.Info("Periodic resync starting (cluster-wide)")
+	}
 
-	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(
+	result, err := ctrl.client.Resource(ctrl.gvr).Namespace(ctrl.watchNamespace).List(
 		ctrl.ctx, metav1.ListOptions{},
 	)
 	if err != nil {
@@ -511,10 +517,14 @@ func (ctrl *Controller) Run() {
 	}
 	ctrl.healthChecker.SetWorkersRunning(true)
 
-	slog.Info("Watching for events")
+	if ctrl.watchNamespace != "" {
+		slog.Info("Watching for events", "namespace", ctrl.watchNamespace)
+	} else {
+		slog.Info("Watching for events (cluster-wide)")
+	}
 
 	for {
-		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace("").Watch(ctrl.ctx, metav1.ListOptions{})
+		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace(ctrl.watchNamespace).Watch(ctrl.ctx, metav1.ListOptions{})
 		if err != nil {
 			slog.Error("Error creating watcher", "error", err)
 			ctrl.healthChecker.SetWatchConnected(false)

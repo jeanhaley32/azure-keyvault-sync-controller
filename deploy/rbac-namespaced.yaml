@@ -1,0 +1,48 @@
+---
+# ServiceAccount for the controller (namespace-scoped)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: azure-keyvault-sync-controller
+  namespace: ${NAMESPACE}
+  labels:
+    app: azure-keyvault-sync-controller
+
+---
+# Role with namespace-scoped permissions (not cluster-wide)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: azure-keyvault-sync-controller
+  namespace: ${NAMESPACE}
+  labels:
+    app: azure-keyvault-sync-controller
+rules:
+  # SecretProviderClass permissions (THIS NAMESPACE ONLY)
+  - apiGroups: ["secrets-store.csi.x-k8s.io"]
+    resources: ["secretproviderclasses"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # Token request permissions (THIS NAMESPACE ONLY)
+  # Can only create tokens for ServiceAccounts in this namespace
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+
+---
+# RoleBinding to bind the Role to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: azure-keyvault-sync-controller
+  namespace: ${NAMESPACE}
+  labels:
+    app: azure-keyvault-sync-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: azure-keyvault-sync-controller
+subjects:
+  - kind: ServiceAccount
+    name: azure-keyvault-sync-controller
+    namespace: ${NAMESPACE}
