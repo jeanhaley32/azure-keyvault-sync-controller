@@ -1,0 +1,89 @@
+---
+# Namespace-scoped deployment of the Azure Key Vault Sync Controller
+# Each namespace that needs secret sync should deploy its own controller instance
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: azure-keyvault-sync-controller
+  namespace: ${NAMESPACE}
+  labels:
+    app: azure-keyvault-sync-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: azure-keyvault-sync-controller
+  template:
+    metadata:
+      labels:
+        app: azure-keyvault-sync-controller
+    spec:
+      serviceAccountName: azure-keyvault-sync-controller
+      containers:
+        - name: controller
+          image: ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
+          imagePullPolicy: Always
+          env:
+            # WATCH_NAMESPACE: Auto-populated from pod's namespace
+            # This ensures the controller only watches this namespace
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+            # Optional: Configure controller behavior
+            # - name: LOG_LEVEL
+            #   value: "INFO"  # DEBUG, INFO, WARN, ERROR (default: INFO)
+            # - name: LOG_FORMAT
+            #   value: "text"  # text or json (default: text)
+            # - name: SYNC_INTERVAL
+            #   value: "5m"  # Duration between full resyncs (default: 5m, min: 30s)
+            # - name: WORKER_COUNT
+            #   value: "5"  # Number of concurrent workers (default: 5, range: 1-100)
+            # - name: HEALTH_CHECK_PORT
+            #   value: "8080"  # Health check server port (default: 8080)
+            # - name: KUBERNETES_QPS
+            #   value: "10.0"  # Kubernetes API queries per second (default: 10.0, range: 0-100)
+            # - name: KUBERNETES_BURST
+            #   value: "20"  # Kubernetes API burst allowance (default: 20, range: 1-200)
+            # - name: AZURE_CIRCUIT_BREAKER_THRESHOLD
+            #   value: "5"  # Failures before opening circuit (default: 5, range: 3-10)
+            # - name: AZURE_CIRCUIT_BREAKER_TIMEOUT
+            #   value: "1m"  # Wait time before retry after open (default: 1m, range: 30s-5m)
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

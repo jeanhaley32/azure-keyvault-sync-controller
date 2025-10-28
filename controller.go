@@ -74,34 +74,48 @@ func isValidForSync(obj *unstructured.Unstructured) (bool, string) {
 }
 
 type Controller struct {
-	client          dynamic.Interface
-	clientset       kubernetes.Interface
-	cache           *SecretProviderClassCache
-	tokenCache      *TokenCache
-	azureTokenCache *AzureTokenCache
-	queue           workqueue.TypedRateLimitingInterface[QueueKey]
-	gvr             schema.GroupVersionResource
-	ctx             context.Context
-	healthChecker   *HealthChecker
-	config          *Config
+	client              dynamic.Interface
+	clientset           kubernetes.Interface
+	cache               *SecretProviderClassCache
+	tokenCache          *TokenCache
+	azureTokenCache     *AzureTokenCache
+	queue               workqueue.TypedRateLimitingInterface[QueueKey]
+	gvr                 schema.GroupVersionResource
+	ctx                 context.Context
+	healthChecker       *HealthChecker
+	config              *Config
+	watchNamespace      string          // Empty = cluster-wide, set = namespace-scoped
+	azureCircuitBreaker *CircuitBreaker // Protects against Azure API failures
 }
 
-func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config) *Controller {
+func NewController(client dynamic.Interface, clientset kubernetes.Interface, config *Config, watchNamespace string) *Controller {
+	// Initialize circuit breaker for Azure API protection
+	azureCB := NewCircuitBreaker(
+		config.AzureCircuitBreakerThreshold,
+		config.AzureCircuitBreakerTimeout,
+	)
+
+	slog.Info("Azure circuit breaker initialized",
+		"threshold", config.AzureCircuitBreakerThreshold,
+		"timeout", config.AzureCircuitBreakerTimeout)
+
 	return &Controller{
-		client:          client,
-		clientset:       clientset,
-		cache:           NewCache(),
-		tokenCache:      NewTokenCache(),
-		azureTokenCache: NewAzureTokenCache(),
-		queue:           workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
+		client:              client,
+		clientset:           clientset,
+		cache:               NewCache(),
+		tokenCache:          NewTokenCache(),
+		azureTokenCache:     NewAzureTokenCache(),
+		queue:               workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
 		gvr: schema.GroupVersionResource{
 			Group:    "secrets-store.csi.x-k8s.io",
 			Version:  "v1",
 			Resource: "secretproviderclasses",
 		},
-		ctx:           context.Background(),
-		healthChecker: NewHealthChecker(),
-		config:        config,
+		ctx:                 context.Background(),
+		healthChecker:       NewHealthChecker(),
+		config:              config,
+		watchNamespace:      watchNamespace,
+		azureCircuitBreaker: azureCB,
 	}
 }
 
@@ -265,10 +279,24 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		return fmt.Errorf("missing keyvaultName: %w", err)
 	}
 
-	// List secrets from vault
-	secrets, err := ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+	// List secrets from vault (protected by circuit breaker)
+	var secrets []string
+	err = ctrl.azureCircuitBreaker.Call(func() error {
+		var listErr error
+		secrets, listErr = ListSecrets(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+		return listErr
+	})
 	if err != nil {
-		// Fail the reconciliation - don't continue with empty secrets
+		if err.Error() == "circuit breaker is open" ||
+		   strings.Contains(err.Error(), "circuit breaker is open") {
+			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
+				"vault", keyvaultName,
+				"namespace", namespace,
+				"name", name)
+			// Return nil to allow requeueing without marking as permanent failure
+			return nil
+		}
+		// Fail the reconciliation for other errors
 		return fmt.Errorf("failed to list secrets from vault %s: %w", keyvaultName, err)
 	}
 
@@ -278,10 +306,24 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 		slog.Debug("Vault secret", "name", secret)
 	}
 
-	// List certificates from vault
-	certificates, err := ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+	// List certificates from vault (protected by circuit breaker)
+	var certificates []string
+	err = ctrl.azureCircuitBreaker.Call(func() error {
+		var listErr error
+		certificates, listErr = ListCertificates(ctrl.ctx, keyvaultName, azureToken, azureTokenExpiration)
+		return listErr
+	})
 	if err != nil {
-		// Fail the reconciliation - don't continue with empty certificates
+		if err.Error() == "circuit breaker is open" ||
+		   strings.Contains(err.Error(), "circuit breaker is open") {
+			slog.Warn("Azure circuit breaker open, skipping vault certificates call",
+				"vault", keyvaultName,
+				"namespace", namespace,
+				"name", name)
+			// Return nil to allow requeueing without marking as permanent failure
+			return nil
+		}
+		// Fail the reconciliation for other errors
 		return fmt.Errorf("failed to list certificates from vault %s: %w", keyvaultName, err)
 	}
 
@@ -372,9 +414,13 @@ func (ctrl *Controller) reconcileResource(obj *unstructured.Unstructured) error 
 
 // enqueueAll enqueues all valid resources for reconciliation
 func (ctrl *Controller) enqueueAll() {
-	slog.Info("Periodic resync starting")
+	if ctrl.watchNamespace != "" {
+		slog.Info("Periodic resync starting", "namespace", ctrl.watchNamespace)
+	} else {
+		slog.Info("Periodic resync starting (cluster-wide)")
+	}
 
-	result, err := ctrl.client.Resource(ctrl.gvr).Namespace("").List(
+	result, err := ctrl.client.Resource(ctrl.gvr).Namespace(ctrl.watchNamespace).List(
 		ctrl.ctx, metav1.ListOptions{},
 	)
 	if err != nil {
@@ -511,10 +557,14 @@ func (ctrl *Controller) Run() {
 	}
 	ctrl.healthChecker.SetWorkersRunning(true)
 
-	slog.Info("Watching for events")
+	if ctrl.watchNamespace != "" {
+		slog.Info("Watching for events", "namespace", ctrl.watchNamespace)
+	} else {
+		slog.Info("Watching for events (cluster-wide)")
+	}
 
 	for {
-		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace("").Watch(ctrl.ctx, metav1.ListOptions{})
+		watcher, err := ctrl.client.Resource(ctrl.gvr).Namespace(ctrl.watchNamespace).Watch(ctrl.ctx, metav1.ListOptions{})
 		if err != nil {
 			slog.Error("Error creating watcher", "error", err)
 			ctrl.healthChecker.SetWatchConnected(false)

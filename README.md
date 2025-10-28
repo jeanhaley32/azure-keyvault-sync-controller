@@ -92,12 +92,36 @@ You must have the Azure Secrets Store CSI Driver infrastructure already set up:
 - Managed Identity with Key Vault RBAC permissions
 - Federated Identity Credential configured
 
-**Deploy Controller:**
+### Deployment Options
+
+The controller supports two deployment models:
+
+1. **Cluster-Wide** (Simple) - Single controller watches all namespaces
+2. **Namespace-Scoped** (Secure) - Per-namespace controller with isolated RBAC
+
+**Cluster-Wide Deployment:**
 ```bash
-# Apply RBAC and controller
+# Apply RBAC and controller (watches all namespaces)
 kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac.yaml
 kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment.yaml
 ```
+
+**Namespace-Scoped Deployment (Recommended for Production):**
+```bash
+# Set target namespace
+export NAMESPACE=production
+
+# Deploy namespace-scoped RBAC and controller
+kubectl apply -f - <<EOF
+$(curl -s https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac-namespaced.yaml | sed "s/\${NAMESPACE}/$NAMESPACE/g")
+EOF
+
+kubectl apply -f - <<EOF
+$(curl -s https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment-namespaced.yaml | sed "s/\${NAMESPACE}/$NAMESPACE/g")
+EOF
+```
+
+See [Namespace-Scoped Examples](examples/namespace-scoped/) for detailed deployment instructions and security benefits.
 
 **Create SecretProviderClass:**
 ```bash
@@ -321,6 +345,10 @@ The controller can be configured via environment variables without requiring cod
 | `SYNC_INTERVAL` | `5m` | Duration ≥ 30s | How often to resync all SecretProviderClasses |
 | `WORKER_COUNT` | `5` | 1-100 | Number of concurrent reconciliation workers |
 | `HEALTH_CHECK_PORT` | `8080` | 1-65535 | Port for health check endpoints (/healthz, /readyz) |
+| `KUBERNETES_QPS` | `10.0` | 0-100 | Kubernetes API queries per second limit |
+| `KUBERNETES_BURST` | `20` | 1-200 | Kubernetes API burst allowance for short spikes |
+| `AZURE_CIRCUIT_BREAKER_THRESHOLD` | `5` | 3-10 | Azure API failures before circuit opens |
+| `AZURE_CIRCUIT_BREAKER_TIMEOUT` | `1m` | 30s-5m | Wait time before testing Azure API after circuit opens |
 
 **Example deployment.yaml configuration:**
 
@@ -335,6 +363,33 @@ env:
 ```
 
 The controller validates all configuration values at startup and will exit immediately with a clear error message if any values are invalid.
+
+### Rate Limiting
+
+The controller implements multiple layers of rate limiting to protect both Kubernetes and Azure APIs:
+
+**Kubernetes API Rate Limiting:**
+- **QPS (Queries Per Second)**: Limits sustained API request rate
+- **Burst**: Allows temporary spikes above QPS for short periods
+- **Purpose**: Prevents controller from overwhelming Kubernetes API server
+- **Default values**: 10 QPS with 20 burst provides good balance for most clusters
+
+**Azure Circuit Breaker:**
+- **Threshold**: Number of consecutive failures before circuit opens
+- **Timeout**: How long to wait before testing if Azure API has recovered
+- **Purpose**: Protects against cascading failures when Azure throttles requests (429 responses)
+- **Behavior**: When open, all Azure calls fail fast to avoid wasting resources
+- **States**:
+  - *Closed*: Normal operation, requests pass through
+  - *Open*: Failures exceeded threshold, all requests fail immediately
+  - *Half-Open*: Testing if service recovered with single request
+
+**Azure 429 Handling:**
+- Automatically detects Azure throttling (429 Too Many Requests)
+- Extracts Retry-After header from Azure response
+- Waits for specified duration before retrying
+- Logs throttling events for monitoring
+- Azure Key Vault limit: 2000 requests per 10 seconds for secrets
 
 ### Token Configuration
 
@@ -541,6 +596,8 @@ The repository includes a GitHub Actions workflow (`.github/workflows/build-and-
 
 ## Security
 
+### Pod Security
+
 The controller is **Pod Security Standards (PSS) Restricted-compliant**:
 - Non-root user (UID 65534)
 - Read-only root filesystem
@@ -548,7 +605,27 @@ The controller is **Pod Security Standards (PSS) Restricted-compliant**:
 - No privilege escalation
 - Seccomp profile enabled (RuntimeDefault)
 
-Deploy to namespaces with PSS enforcement enabled for maximum security.
+### Deployment Models
+
+**Namespace-Scoped (Recommended for Production):**
+- **Blast Radius:** Single namespace only
+- **Token Creation:** Limited to same namespace ServiceAccounts
+- **RBAC:** Role (namespace-only) instead of ClusterRole
+- **Security:** 90%+ reduction in privilege escalation risk
+
+**Cluster-Wide (Simple Deployment):**
+- **Blast Radius:** Entire cluster
+- **Token Creation:** Any ServiceAccount in any namespace
+- **RBAC:** ClusterRole with cluster-wide permissions
+- **Use Case:** Small clusters, single-tenant environments
+
+**When to Use Namespace-Scoped:**
+- Multi-tenant clusters
+- Production environments
+- Security-critical deployments
+- Defense in depth required
+
+See [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) for detailed security assessment and recommendations.
 
 ## Next Steps
 

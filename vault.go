@@ -77,6 +77,18 @@ func ListSecrets(
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
+			// Check for Azure throttling (429)
+			if IsAzureThrottled(err) {
+				retryAfter := ExtractRetryAfter(err)
+				slog.Warn("Azure throttled secrets request",
+					"vault", vaultName,
+					"retryAfter", retryAfter)
+
+				// Wait for the retry period
+				time.Sleep(retryAfter)
+				continue // Retry this page
+			}
+
 			return nil, fmt.Errorf("failed to get next page of secrets: %w", err)
 		}
 
@@ -130,6 +142,18 @@ func ListCertificates(
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
+			// Check for Azure throttling (429)
+			if IsAzureThrottled(err) {
+				retryAfter := ExtractRetryAfter(err)
+				slog.Warn("Azure throttled certificates request",
+					"vault", vaultName,
+					"retryAfter", retryAfter)
+
+				// Wait for the retry period
+				time.Sleep(retryAfter)
+				continue // Retry this page
+			}
+
 			return nil, fmt.Errorf("failed to get next page of certificates: %w", err)
 		}
 
