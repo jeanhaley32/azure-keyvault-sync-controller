@@ -34,18 +34,27 @@ func main() {
 		"workerCount", cfg.WorkerCount,
 		"logLevel", cfg.LogLevel)
 
-	var kubeconfig string
-	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = filepath.Join(home, ".kube", "config")
-	} else {
-		slog.Error("Unable to find home directory")
-		os.Exit(1)
-	}
-
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	// Try in-cluster config first (for running in Kubernetes)
+	config, err := clientcmd.BuildConfigFromFlags("", "")
 	if err != nil {
-		slog.Error("Error building kubeconfig", "error", err)
-		os.Exit(1)
+		// Fall back to kubeconfig file for local development
+		slog.Info("In-cluster config not available, trying kubeconfig file")
+		var kubeconfig string
+		if home := homedir.HomeDir(); home != "" {
+			kubeconfig = filepath.Join(home, ".kube", "config")
+		} else {
+			slog.Error("Unable to find home directory for kubeconfig")
+			os.Exit(1)
+		}
+
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			slog.Error("Error building kubeconfig", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("Using kubeconfig file", "path", kubeconfig)
+	} else {
+		slog.Info("Using in-cluster configuration")
 	}
 
 	// Apply Kubernetes API rate limits

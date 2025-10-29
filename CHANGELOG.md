@@ -1,5 +1,28 @@
 # Development Log
 
+## 2025-10-28
+
+### Release v1.3.2: Critical Kubernetes Deployment Fix
+
+**PR:** #29
+**Branch:** `debug/bugfix` → `staging` → `main`
+
+**Critical Bug Fix:**
+- Fixed in-cluster Kubernetes configuration authentication
+- Application was hardcoded to use local `~/.kube/config` file
+- Would crash immediately with "Unable to find home directory" when deployed as a pod
+- Now properly uses ServiceAccount token for in-cluster authentication
+
+**Changes:**
+- `main.go`: Attempt in-cluster config first, fall back to kubeconfig for local dev
+- Added logging to indicate which configuration method is being used
+- Maintains backward compatibility for local development
+
+**Impact:**
+- Controller can now properly run in Kubernetes pods
+- Uses ServiceAccount token at `/var/run/secrets/kubernetes.io/serviceaccount/token`
+- Works with RBAC permissions defined in `deploy/rbac.yaml`
+
 ## 2025-10-24
 
 ### Learning Session: Kubernetes Watch Mechanisms
