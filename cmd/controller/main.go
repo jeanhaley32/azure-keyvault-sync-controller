@@ -10,6 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/config"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/controller"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/health"
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/logger"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
@@ -18,7 +22,7 @@ import (
 
 func main() {
 	// Load and validate configuration
-	cfg, err := LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		// Can't use slog yet since logger isn't initialized
 		println("FATAL: Configuration error:", err.Error())
@@ -26,7 +30,7 @@ func main() {
 	}
 
 	// Initialize structured logger with configuration
-	InitLogger(cfg)
+	logger.InitLogger(cfg)
 
 	slog.Info("Starting Azure Key Vault Sync Controller")
 	slog.Info("Configuration loaded",
@@ -84,13 +88,13 @@ func main() {
 		slog.Info("Cluster-wide mode enabled (watching all namespaces)")
 	}
 
-	controller := NewController(spcClientset, clientset, cfg, watchNamespace)
+	controller := controller.NewController(spcClientset, clientset, cfg, watchNamespace)
 
 	// Start health check server
 	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
 	slog.Info("Starting health check server", "address", healthAddr)
 	go func() {
-		if err := StartHealthCheckServer(healthAddr, controller.healthChecker); err != nil {
+		if err := health.StartHealthCheckServer(healthAddr, controller.HealthChecker); err != nil {
 			slog.Error("Health check server failed", "error", err)
 			os.Exit(1)
 		}

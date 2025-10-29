@@ -1,15 +1,17 @@
-package main
+package logger
 
 import (
 	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/config"
 )
 
 var logger *slog.Logger
 
 // InitLogger initializes the global structured logger
-func InitLogger(cfg *Config) {
+func InitLogger(cfg *config.Config) {
 	// Get log level from configuration
 	logLevel := getLogLevel(cfg.LogLevel)
 
