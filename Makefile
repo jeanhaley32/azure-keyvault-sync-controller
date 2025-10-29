@@ -91,8 +91,29 @@ status: ## Check controller status
 ##@ Testing
 
 .PHONY: test
-test: ## Run tests (placeholder for future)
-	@echo "No tests implemented yet"
+test: ## Run unit tests
+	@echo "Running unit tests..."
+	go test -v -race -cover ./internal/...
+	@echo "Tests complete"
+
+.PHONY: test-coverage
+test-coverage: ## Generate coverage report
+	@echo "Generating coverage report..."
+	go test -coverprofile=coverage.out ./internal/...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+
+.PHONY: test-race
+test-race: ## Run tests with race detector
+	@echo "Running tests with race detector..."
+	go test -race ./internal/...
+	@echo "Race detection complete"
+
+.PHONY: test-verbose
+test-verbose: ## Run tests with verbose output
+	@echo "Running tests (verbose)..."
+	go test -v ./internal/...
+	@echo "Tests complete"
 
 ##@ Utilities
 
