@@ -639,7 +639,7 @@ Complete documentation is available in the [docs/](docs/) directory:
 ### For Developers
 - [Architecture Overview](docs/design/security-analysis.md) - System design
 - [Testing Guide](#testing) - Running tests
-- [Planning Documents](docs/planning/) - Feature planning and proposals
+- [Historical Planning](docs/archive/) - Archived planning documents (2024-2025)
 
 ### Additional Resources
 - [CHANGELOG.md](CHANGELOG.md) - Version history

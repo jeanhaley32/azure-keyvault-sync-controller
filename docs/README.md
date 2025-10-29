@@ -10,17 +10,12 @@ This directory contains all documentation for the Azure Key Vault Sync Controlle
 - [ROADMAP](../ROADMAP.md) - Future development plans
 - [LICENSE](../LICENSE) - Apache 2.0 license
 
-### Planning Documents (`planning/`)
-Historical planning and implementation documents:
-- [architecture-improvements.md](planning/architecture-improvements.md) - Architectural enhancement proposals
-- [azure-token-exchange.md](planning/azure-token-exchange.md) - Azure AD token exchange implementation
-- [keyvault-integration.md](planning/keyvault-integration.md) - Key Vault integration design
-- [namespace-scoping.md](planning/namespace-scoping.md) - Namespace-scoped deployment planning
-- [rate-limiting-implementation.md](planning/rate-limiting-implementation.md) - Rate limiting design and implementation
-- [secretproviderclass-updates.md](planning/secretproviderclass-updates.md) - SecretProviderClass update handling
-- [token-acquisition-implementation.md](planning/token-acquisition-implementation.md) - Token acquisition flow
-- [token-acquisition.md](planning/token-acquisition.md) - Token management design
-- [workflow-blindspot-fixes.md](planning/workflow-blindspot-fixes.md) - Workflow improvement proposals
+### Archived Documents (`archive/`)
+Historical planning documents from initial development (Oct 2024 - Oct 2025):
+- [Archive README](archive/README.md) - Overview of archived planning documents
+- [archive/planning/](archive/planning/) - Feature planning and implementation proposals (ARCHIVED)
+
+**Note:** Planning documents have been archived as all planned features are now implemented. See the archive README for historical context and decision-making rationale.
 
 ### Design Documents (`design/`)
 Architecture and design decisions:
@@ -57,12 +52,14 @@ Example configurations and usage patterns:
 
 ## Contributing Documentation
 
-When adding new features:
-1. Update relevant planning documents or create new ones
-2. Update the main README if user-facing changes
-3. Add examples to `examples/` if applicable
-4. Update CHANGELOG with your changes
-5. Create session notes if significant architectural decisions were made
+When working on the project:
+1. Update the main README if user-facing changes
+2. Add examples to `examples/` if applicable
+3. Update CHANGELOG with your changes
+4. Create session notes if significant architectural decisions were made
+5. Update design documents if architecture changes
+
+**Note:** Project is in production maintenance mode. Planning documents are archived.
 
 ## Quick Links
 
