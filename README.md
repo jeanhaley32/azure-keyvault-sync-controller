@@ -625,12 +625,52 @@ The controller is **Pod Security Standards (PSS) Restricted-compliant**:
 - Security-critical deployments
 - Defense in depth required
 
-See [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) for detailed security assessment and recommendations.
+See [docs/design/security-analysis.md](docs/design/security-analysis.md) for detailed security assessment and recommendations.
+
+## Documentation
+
+Complete documentation is available in the [docs/](docs/) directory:
+
+### For Operators
+- [Installation Guide](#installation) - Setup instructions
+- [Configuration Reference](#configuration) - All environment variables
+- [Examples](examples/README.md) - Sample configurations
+
+### For Developers
+- [Architecture Overview](docs/design/security-analysis.md) - System design
+- [Testing Guide](#testing) - Running tests
+- [Historical Planning](docs/archive/) - Archived planning documents (2024-2025)
+
+### Additional Resources
+- [CHANGELOG.md](CHANGELOG.md) - Version history
+- [ROADMAP.md](ROADMAP.md) - Future plans
+- [Rate Limiting Design](docs/design/rate-limiting.md) - Detailed rate limiting architecture
+
+## Testing
+
+The project includes comprehensive test coverage:
+
+```bash
+# Run all tests with race detector
+make test
+
+# Generate coverage report
+make test-coverage
+
+# Run tests in verbose mode
+make test-verbose
+```
+
+**Test Coverage:**
+- `internal/cache` - 100% coverage
+- `internal/circuitbreaker` - 100% coverage
+- `internal/config` - 98.5% coverage
+- `internal/update` - 82.2% coverage
 
 ## Next Steps
 
 **Phase 5: Production Enhancements** (Future)
-- Comprehensive test coverage (unit, integration, e2e)
+- Integration and e2e tests
 - GoDoc API reference documentation
 - Release process documentation
 
