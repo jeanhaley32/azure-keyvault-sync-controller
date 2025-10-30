@@ -117,6 +117,11 @@ test-verbose: ## Run tests with verbose output
 
 ##@ Utilities
 
+.PHONY: lint
+lint: ## Run golangci-lint and go vet
+	golangci-lint run ./...
+	go vet ./...
+
 .PHONY: fmt
 fmt: ## Run go fmt
 	go fmt ./...

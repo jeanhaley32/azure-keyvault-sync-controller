@@ -2,6 +2,7 @@ package health
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -82,7 +83,10 @@ func (h *HealthChecker) GetStatus() map[string]interface{} {
 // Returns 200 OK if the process is alive
 func HealthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+    if _, err := w.Write([]byte("ok")); err != nil {
+        // Best-effort write for liveness probe
+        slog.Debug("healthz write failed", "error", err)
+    }
 }
 
 // ReadyzHandler handles /readyz readiness probe
@@ -91,15 +95,20 @@ func ReadyzHandler(checker *HealthChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if checker.IsReady() {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ready"))
+            if _, err := w.Write([]byte("ready")); err != nil {
+                // Best-effort write for readiness probe
+                slog.Debug("readyz write failed", "error", err)
+            }
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			// Include status details in response for debugging
 			status := checker.GetStatus()
-			json.NewEncoder(w).Encode(map[string]interface{}{
+            if err := json.NewEncoder(w).Encode(map[string]interface{}{
 				"ready":  false,
 				"status": status,
-			})
+            }); err != nil {
+                slog.Debug("readyz encode failed", "error", err)
+            }
 		}
 	}
 }
@@ -111,7 +120,9 @@ func StatusHandler(checker *HealthChecker) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		status := checker.GetStatus()
 		status["ready"] = checker.IsReady()
-		json.NewEncoder(w).Encode(status)
+        if err := json.NewEncoder(w).Encode(status); err != nil {
+            slog.Debug("status encode failed", "error", err)
+        }
 	}
 }
 
