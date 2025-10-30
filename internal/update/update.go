@@ -257,45 +257,79 @@ func secretObjectsEqual(a, b *secretsstorev1.SecretObject) bool {
 
 // GenerateSecretObjectsFromVault creates SecretObject entries for vault secrets and certificates
 // Vault is the source of truth - no merging with existing secretObjects
-func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecrets bool, enableCerts bool) []*secretsstorev1.SecretObject {
-	var secretObjects []*secretsstorev1.SecretObject
+// VaultSecretWithTags represents a vault secret with its name and tags
+type VaultSecretWithTags struct {
+	Name string
+	Tags map[string]*string
+}
 
-	// Add secrets (type: Opaque) if enabled
-	if enableSecrets {
-		for _, secretName := range secrets {
+// VaultCertWithTags represents a vault certificate with its name and tags
+type VaultCertWithTags struct {
+	Name string
+	Tags map[string]*string
+}
+
+// hasTag checks if a tag key has the exact value "true"
+func hasTag(tags map[string]*string, key string) bool {
+	if tags == nil {
+		return false
+	}
+	value, exists := tags[key]
+	if !exists || value == nil {
+		return false
+	}
+	return *value == "true"
+}
+
+// GenerateSecretObjectsFromVault generates K8s Secret objects based on vault tags
+// Only secrets/certs with secret-object=true or cert-object=true tags are included
+// Vault tags are the source of truth - SPC annotations are no longer used
+func GenerateSecretObjectsFromVault(secrets []VaultSecretWithTags, certs []VaultCertWithTags) []*secretsstorev1.SecretObject {
+	var secretObjects []*secretsstorev1.SecretObject
+	var secretCount, certCount int
+
+	// Add secrets (type: Opaque) if they have secret-object=true tag
+	for _, secret := range secrets {
+		if hasTag(secret.Tags, "secret-object") {
 			secretObjects = append(secretObjects, &secretsstorev1.SecretObject{
-				SecretName: secretName,
+				SecretName: secret.Name,
 				Type:       "Opaque",
 				Data: []*secretsstorev1.SecretObjectData{
 					{
-						Key:        secretName,
-						ObjectName: secretName,
+						Key:        secret.Name,
+						ObjectName: secret.Name,
 					},
 				},
 			})
+			secretCount++
+			slog.Debug("Secret opted into K8s Secret generation", "name", secret.Name)
+		} else {
+			slog.Debug("Secret opted out of K8s Secret generation", "name", secret.Name)
 		}
-		slog.Debug("Generated Opaque secretObjects for secrets", "count", len(secrets))
 	}
 
-	// Add certificates (type: kubernetes.io/tls) if enabled
-	if enableCerts {
-		for _, certName := range certs {
+	// Add certificates (type: kubernetes.io/tls) if they have cert-object=true tag
+	for _, cert := range certs {
+		if hasTag(cert.Tags, "cert-object") {
 			secretObjects = append(secretObjects, &secretsstorev1.SecretObject{
-				SecretName: certName,
+				SecretName: cert.Name,
 				Type:       "kubernetes.io/tls",
 				Data: []*secretsstorev1.SecretObjectData{
 					{
 						Key:        "tls.key",
-						ObjectName: certName,
+						ObjectName: cert.Name,
 					},
 					{
 						Key:        "tls.crt",
-						ObjectName: certName,
+						ObjectName: cert.Name,
 					},
 				},
 			})
+			certCount++
+			slog.Debug("Certificate opted into K8s Secret generation", "name", cert.Name)
+		} else {
+			slog.Debug("Certificate opted out of K8s Secret generation", "name", cert.Name)
 		}
-		slog.Debug("Generated TLS secretObjects for certificates", "count", len(certs))
 	}
 
 	// Sort by secretName for consistent output
@@ -303,6 +337,9 @@ func GenerateSecretObjectsFromVault(secrets []string, certs []string, enableSecr
 		return secretObjects[i].SecretName < secretObjects[j].SecretName
 	})
 
-	slog.Info("Generated secretObjects", "totalCount", len(secretObjects))
+	slog.Info("Generated secretObjects from vault tags",
+		"totalCount", len(secretObjects),
+		"secretsWithTag", secretCount,
+		"certsWithTag", certCount)
 	return secretObjects
 }

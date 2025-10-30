@@ -7,11 +7,12 @@ A production-ready Kubernetes controller that automatically synchronizes Azure K
 This controller watches SecretProviderClass resources and automatically:
 - Discovers secrets and certificates in Azure Key Vault
 - Updates the `objects` array to match vault contents
-- Optionally generates `secretObjects` for automatic Kubernetes Secret creation
+- Optionally generates `secretObjects` for automatic Kubernetes Secret creation (via vault tags)
+- Supports tag-based filtering for service and environment separation
 - Handles permission errors gracefully with retry logic
 - Provides immediate event-driven reconciliation
 
-**Key Feature:** Vault is the single source of truth - no manual object management required.
+**Key Feature:** Azure Key Vault is the single source of truth - vault tags control all behavior including filtering and secret generation.
 
 ## When to Use This Controller
 
@@ -236,7 +237,7 @@ metadata:
   name: example-secrets
   namespace: default
   annotations:
-    azure-keyvault-sync/enabled: "true"
+    # Presence of service-account annotation enables automatic sync
     azure-keyvault-sync/service-account: "workload-service-account"
 spec:
   provider: azure
@@ -251,6 +252,24 @@ spec:
 
 #### With Kubernetes Secret Generation
 
+Kubernetes Secret generation is controlled by **vault tags** (not annotations). Tag your secrets in Azure Key Vault with `secret-object="true"` or `cert-object="true"` to generate Kubernetes Secrets.
+
+**Tag secrets in Azure:**
+```bash
+# Tag a secret for K8s Secret generation
+az keyvault secret set-attributes \
+  --vault-name staging-example-vault \
+  --name database-password \
+  --tags secret-object=true
+
+# Tag a certificate for K8s TLS Secret generation
+az keyvault certificate set-attributes \
+  --vault-name staging-example-vault \
+  --name tls-cert \
+  --tags cert-object=true
+```
+
+**SecretProviderClass:**
 ```yaml
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
@@ -258,10 +277,8 @@ metadata:
   name: example-secrets
   namespace: default
   annotations:
-    azure-keyvault-sync/enabled: "true"
+    # Presence of service-account annotation enables automatic sync
     azure-keyvault-sync/service-account: "workload-service-account"
-    azure-keyvault-sync/secret-objects: "true"     # Enable secret sync
-    azure-keyvault-sync/cert-objects: "true"       # Enable certificate sync
 spec:
   provider: azure
   parameters:
@@ -269,44 +286,157 @@ spec:
     clientID: "00000000-0000-0000-0000-000000000000"
     tenantId: "11111111-1111-1111-1111-111111111111"
     objects: ""        # Will be auto-populated
-  secretObjects: []    # Will be auto-populated
+  secretObjects: []    # Will be auto-populated based on vault tags
 ```
 
 **Result:**
-- Controller populates both `objects` and `secretObjects` arrays
+- Controller discovers ALL secrets/certificates in vault
+- Populates `objects` array with all vault contents
+- Only secrets with `secret-object="true"` tag are added to `secretObjects` array
+- Only certificates with `cert-object="true"` tag are added to `secretObjects` array
 - CSI driver automatically creates Kubernetes Secrets (type: Opaque for secrets, kubernetes.io/tls for certificates)
+
+**Important:** Only the exact lowercase string `"true"` works. Values like `"True"`, `"1"`, `"yes"`, or `"false"` are treated as opt-out.
 
 ### Annotations Reference
 
 | Annotation | Required | Description |
 |------------|----------|-------------|
-| `azure-keyvault-sync/enabled` | Yes | Set to `"true"` to enable sync |
-| `azure-keyvault-sync/service-account` | Yes | ServiceAccount name for impersonation |
-| `azure-keyvault-sync/secret-objects` | No | Set to `"true"` to create Kubernetes Secrets from vault secrets |
-| `azure-keyvault-sync/cert-objects` | No | Set to `"true"` to create Kubernetes TLS Secrets from vault certificates |
+| `azure-keyvault-sync/service-account` | **Yes** | ServiceAccount name for impersonation. **Presence of this annotation enables automatic sync** (implicit opt-in) |
+| `azure-keyvault-sync/respect-tags` | No | Set to `"true"` to enable tag-based filtering (see Tag Filtering section) |
 | `azure-keyvault-sync/last-sync` | Auto | Timestamp of last successful sync (set by controller) |
 
+### Azure Key Vault Tags Reference
+
+| Tag | Values | Description |
+|-----|--------|-------------|
+| `service` | string | Required for tag filtering; matches against SPC `service` label |
+| `environment` | string | Optional for environment separation; matches against SPC `environment` label |
+| `secret-object` | `"true"` | Must be exactly `"true"` (lowercase) to generate a Kubernetes Secret (type: Opaque) |
+| `cert-object` | `"true"` | Must be exactly `"true"` (lowercase) to generate a Kubernetes Secret (type: kubernetes.io/tls) |
+
+### Tag Filtering
+
+Enable **tag-based filtering** to selectively sync secrets from shared vaults based on service and environment.
+
+#### Basic Tag Filtering Setup
+
+1. **Tag secrets in Azure Key Vault:**
+```bash
+# Tag a production web API secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name db-password \
+  --tags service=web-api environment=production
+
+# Tag a staging web API secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name db-password-staging \
+  --tags service=web-api environment=staging
+
+# Tag an environment-agnostic secret (no environment tag)
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name api-key \
+  --tags service=web-api
+```
+
+2. **Configure SecretProviderClass:**
+```yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: web-api-secrets
+  namespace: production
+  labels:
+    service: web-api          # Required when respect-tags enabled
+    environment: production    # Optional (allows env-agnostic secrets)
+  annotations:
+    azure-keyvault-sync/service-account: "web-api"
+    azure-keyvault-sync/respect-tags: "true"  # Enable tag filtering
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: "shared-vault"
+    clientID: "00000000-0000-0000-0000-000000000000"
+    tenantId: "11111111-1111-1111-1111-111111111111"
+```
+
+**Result:**
+- ✅ `db-password` - Included (service+env match)
+- ❌ `db-password-staging` - Rejected (env mismatch)
+- ✅ `api-key` - Included (service match, env-agnostic)
+
+#### Tag Filtering Behavior
+
+**Service Tag (Required):**
+- Vault secret MUST have `service` tag matching SPC `service` label
+- Secrets without `service` tag are REJECTED (strict mode)
+- Case-insensitive matching (`Web-API` matches `web-api`)
+
+**Environment Tag (Optional):**
+- If vault secret has `environment` tag, it must match SPC `environment` label
+- Secrets without `environment` tag are treated as environment-agnostic (shared across all environments)
+- SPC can have `environment` label and still sync env-agnostic secrets
+
+**Examples:**
+
+| Vault Tags | SPC Labels | Result |
+|-------------|------------|--------|
+| `service: web-api` | `service: web-api` | ✅ Included |
+| `service: web-api, environment: prod` | `service: web-api, environment: prod` | ✅ Included |
+| `service: web-api, environment: prod` | `service: web-api, environment: staging` | ❌ Rejected (env mismatch) |
+| `service: web-api` | `service: web-api, environment: prod` | ✅ Included (env-agnostic) |
+| `service: mobile-api` | `service: web-api` | ❌ Rejected (service mismatch) |
+| No tags | `service: web-api` | ❌ Rejected (no service tag) |
+
+#### Combined Tag Filtering + Secret Generation
+
+Tag filtering runs FIRST, then secret-object evaluation. Only secrets that pass filtering are evaluated for Kubernetes Secret generation.
+
+```bash
+# This secret will be synced AND generated as K8s Secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name db-password \
+  --tags service=web-api environment=production secret-object=true
+
+# This secret is rejected by filtering, secret-object tag is NOT evaluated
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name mobile-secret \
+  --tags service=mobile-api secret-object=true
+```
+
+**For complete tag filtering documentation, see:**
+- [Tag Filtering Decision Tree](docs/design/tag-filtering-decision-tree.md) - Comprehensive decision logic and scenarios
+- [examples/tag-filtering/](examples/tag-filtering/) - Working examples
+
 ### Vault as Source of Truth
-**Important:** The controller uses vault contents as the single source of truth. This means:
 
-> This design choice is based on my current usage: one vault per service, with separate accounts for each service.
-> It may be possible to add annotations within Azure's Vault secrets to enable selective secrets
-> syncing. As it stands this controller is intended to sync all of the secrets within a particular vault to
-> the target SecretProviderClass
+Azure Key Vault is the single source of truth for all configuration:
 
+✅ **Vault Controls:**
+- Which secrets are synced (via tag filtering)
+- Which secrets become Kubernetes Secrets (via `secret-object`/`cert-object` tags)
+- Secret/certificate versions (via Azure Key Vault versioning)
+- Service and environment targeting (via `service`/`environment` tags)
 
 ✅ **Supported:**
 - Vault secrets automatically appear in `objects` array
 - Vault deletions automatically removed from `objects` array
-- Use Azure Key Vault versioning for pinning specific versions
+- Tag changes immediately reflected in next sync
+- Intention-based reconciliation (vault state → desired state → remediation)
 
 ❌ **Not Supported:**
 - Manual object definitions in SecretProviderClass (they will be overwritten)
 - Mixing manual and automatic objects
+- SPC annotations controlling secret generation (use vault tags instead)
 
 **Migration Path:**
 If you need custom object configurations:
-1. **Option A:** Move objects to vault and use vault versioning
+1. **Option A:** Use vault tags to control behavior (recommended)
 2. **Option B:** Create separate SecretProviderClass without sync annotations
 3. **Option C:** Disable sync for specific resources (remove annotations)
 
@@ -530,11 +660,42 @@ Look for:
 
 ### Secrets not created
 
-If `secretObjects` annotation is enabled but no Secrets created:
-1. Check controller logs for errors
-2. Verify CSI driver is running: `kubectl get pods -n kube-system -l app=secrets-store-csi-driver`
-3. Check pod using SecretProviderClass has volume mount
-4. Review CSI driver logs: `kubectl logs -n kube-system -l app=secrets-store-csi-driver`
+If Kubernetes Secrets are not being created from vault contents:
+
+1. **Check vault tags** (Secrets are controlled by vault tags, not annotations):
+```bash
+# Verify secret has secret-object=true tag
+az keyvault secret show --vault-name my-vault --name my-secret \
+  --query "tags.\"secret-object\"" -o tsv
+# Should output: true (lowercase)
+
+# Verify certificate has cert-object=true tag
+az keyvault certificate show --vault-name my-vault --name my-cert \
+  --query "tags.\"cert-object\"" -o tsv
+# Should output: true (lowercase)
+```
+
+2. **Verify tag value is exactly `"true"`** (case-sensitive):
+   - ✅ Works: `secret-object: "true"`
+   - ❌ Doesn't work: `"True"`, `"1"`, `"yes"`, `"false"`
+
+3. **Check if tag filtering is rejecting the secret:**
+```bash
+# If respect-tags is enabled, secret must pass filtering first
+kubectl logs -l app=azure-keyvault-sync-controller | grep "rejected by tag filter"
+```
+
+4. **Verify SecretProviderClass has secretObjects populated:**
+```bash
+kubectl get secretproviderclass my-spc -o jsonpath='{.spec.secretObjects}'
+```
+
+5. **Check CSI driver:**
+   - Verify CSI driver is running: `kubectl get pods -n kube-system -l app=secrets-store-csi-driver`
+   - Check pod using SecretProviderClass has volume mount
+   - Review CSI driver logs: `kubectl logs -n kube-system -l app=secrets-store-csi-driver`
+
+**Remember:** Secrets appear in `objects` array (for CSI volume mount) regardless of tags. Only `secret-object="true"` or `cert-object="true"` tags create standalone Kubernetes Secrets.
 
 ## Container Images
 

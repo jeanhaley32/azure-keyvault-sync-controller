@@ -248,32 +248,33 @@ func TestDetectChanges(t *testing.T) {
 	}
 }
 
+func ptr(s string) *string {
+	return &s
+}
+
 func TestGenerateSecretObjectsFromVault(t *testing.T) {
 	tests := []struct {
-		name          string
-		secrets       []string
-		certs         []string
-		enableSecrets bool
-		enableCerts   bool
-		expectedLen   int
-		checkFirst    *secretsstorev1.SecretObject
-		checkLast     *secretsstorev1.SecretObject
+		name        string
+		secrets     []VaultSecretWithTags
+		certs       []VaultCertWithTags
+		expectedLen int
+		checkFirst  *secretsstorev1.SecretObject
+		checkLast   *secretsstorev1.SecretObject
 	}{
 		{
-			name:          "empty inputs with both enabled",
-			secrets:       []string{},
-			certs:         []string{},
-			enableSecrets: true,
-			enableCerts:   true,
-			expectedLen:   0,
+			name:        "empty inputs",
+			secrets:     []VaultSecretWithTags{},
+			certs:       []VaultCertWithTags{},
+			expectedLen: 0,
 		},
 		{
-			name:          "secrets enabled only",
-			secrets:       []string{"db-password", "api-key"},
-			certs:         []string{"tls-cert"},
-			enableSecrets: true,
-			enableCerts:   false,
-			expectedLen:   2,
+			name: "secrets with secret-object=true tag",
+			secrets: []VaultSecretWithTags{
+				{Name: "db-password", Tags: map[string]*string{"secret-object": ptr("true")}},
+				{Name: "api-key", Tags: map[string]*string{"secret-object": ptr("true")}},
+			},
+			certs:       []VaultCertWithTags{},
+			expectedLen: 2,
 			checkFirst: &secretsstorev1.SecretObject{
 				SecretName: "api-key",
 				Type:       "Opaque",
@@ -283,12 +284,30 @@ func TestGenerateSecretObjectsFromVault(t *testing.T) {
 			},
 		},
 		{
-			name:          "certs enabled only",
-			secrets:       []string{"db-password"},
-			certs:         []string{"tls-cert", "ca-cert"},
-			enableSecrets: false,
-			enableCerts:   true,
-			expectedLen:   2,
+			name: "secrets without secret-object tag (opted out)",
+			secrets: []VaultSecretWithTags{
+				{Name: "db-password", Tags: map[string]*string{}},
+				{Name: "api-key", Tags: nil},
+			},
+			certs:       []VaultCertWithTags{},
+			expectedLen: 0,
+		},
+		{
+			name: "secrets with secret-object=false (explicit opt-out)",
+			secrets: []VaultSecretWithTags{
+				{Name: "db-password", Tags: map[string]*string{"secret-object": ptr("false")}},
+			},
+			certs:       []VaultCertWithTags{},
+			expectedLen: 0,
+		},
+		{
+			name:    "certs with cert-object=true tag",
+			secrets: []VaultSecretWithTags{},
+			certs: []VaultCertWithTags{
+				{Name: "tls-cert", Tags: map[string]*string{"cert-object": ptr("true")}},
+				{Name: "ca-cert", Tags: map[string]*string{"cert-object": ptr("true")}},
+			},
+			expectedLen: 2,
 			checkFirst: &secretsstorev1.SecretObject{
 				SecretName: "ca-cert",
 				Type:       "kubernetes.io/tls",
@@ -299,28 +318,34 @@ func TestGenerateSecretObjectsFromVault(t *testing.T) {
 			},
 		},
 		{
-			name:          "both enabled",
-			secrets:       []string{"secret1"},
-			certs:         []string{"cert1"},
-			enableSecrets: true,
-			enableCerts:   true,
-			expectedLen:   2,
+			name:    "certs without cert-object tag (opted out)",
+			secrets: []VaultSecretWithTags{},
+			certs: []VaultCertWithTags{
+				{Name: "tls-cert", Tags: map[string]*string{}},
+			},
+			expectedLen: 0,
 		},
 		{
-			name:          "both disabled",
-			secrets:       []string{"secret1", "secret2"},
-			certs:         []string{"cert1", "cert2"},
-			enableSecrets: false,
-			enableCerts:   false,
-			expectedLen:   0,
+			name: "mixed - some opted in, some opted out",
+			secrets: []VaultSecretWithTags{
+				{Name: "secret1", Tags: map[string]*string{"secret-object": ptr("true")}},
+				{Name: "secret2", Tags: map[string]*string{}}, // No tag - opt out
+			},
+			certs: []VaultCertWithTags{
+				{Name: "cert1", Tags: map[string]*string{"cert-object": ptr("true")}},
+				{Name: "cert2", Tags: map[string]*string{}}, // No tag - opt out
+			},
+			expectedLen: 2, // Only secret1 and cert1
 		},
 		{
-			name:          "sorting verification",
-			secrets:       []string{"zebra", "apple", "middle"},
-			certs:         []string{},
-			enableSecrets: true,
-			enableCerts:   false,
-			expectedLen:   3,
+			name: "sorting verification",
+			secrets: []VaultSecretWithTags{
+				{Name: "zebra", Tags: map[string]*string{"secret-object": ptr("true")}},
+				{Name: "apple", Tags: map[string]*string{"secret-object": ptr("true")}},
+				{Name: "middle", Tags: map[string]*string{"secret-object": ptr("true")}},
+			},
+			certs:       []VaultCertWithTags{},
+			expectedLen: 3,
 			checkFirst: &secretsstorev1.SecretObject{
 				SecretName: "apple",
 				Type:       "Opaque",
@@ -330,11 +355,23 @@ func TestGenerateSecretObjectsFromVault(t *testing.T) {
 				Type:       "Opaque",
 			},
 		},
+		{
+			name: "tags with service and environment (should be ignored for secret-object decision)",
+			secrets: []VaultSecretWithTags{
+				{Name: "db-password", Tags: map[string]*string{
+					"service":       ptr("web-api"),
+					"environment":   ptr("production"),
+					"secret-object": ptr("true"), // This is what matters
+				}},
+			},
+			certs:       []VaultCertWithTags{},
+			expectedLen: 1,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := GenerateSecretObjectsFromVault(tt.secrets, tt.certs, tt.enableSecrets, tt.enableCerts)
+			result := GenerateSecretObjectsFromVault(tt.secrets, tt.certs)
 
 			assert.Equal(t, tt.expectedLen, len(result), "unexpected number of secret objects")
 
@@ -375,6 +412,71 @@ func TestGenerateSecretObjectsFromVault(t *testing.T) {
 					assert.Equal(t, "tls.crt", so.Data[1].Key)
 				}
 			}
+		})
+	}
+}
+
+func TestHasTag(t *testing.T) {
+	tests := []struct {
+		name     string
+		tags     map[string]*string
+		key      string
+		expected bool
+	}{
+		{
+			name:     "nil tags",
+			tags:     nil,
+			key:      "secret-object",
+			expected: false,
+		},
+		{
+			name:     "empty tags",
+			tags:     map[string]*string{},
+			key:      "secret-object",
+			expected: false,
+		},
+		{
+			name:     "tag exists with true value",
+			tags:     map[string]*string{"secret-object": ptr("true")},
+			key:      "secret-object",
+			expected: true,
+		},
+		{
+			name:     "tag exists with false value",
+			tags:     map[string]*string{"secret-object": ptr("false")},
+			key:      "secret-object",
+			expected: false,
+		},
+		{
+			name:     "tag exists with empty value",
+			tags:     map[string]*string{"secret-object": ptr("")},
+			key:      "secret-object",
+			expected: false,
+		},
+		{
+			name:     "tag exists with random value",
+			tags:     map[string]*string{"secret-object": ptr("yes")},
+			key:      "secret-object",
+			expected: false,
+		},
+		{
+			name:     "tag key doesn't exist",
+			tags:     map[string]*string{"other-tag": ptr("true")},
+			key:      "secret-object",
+			expected: false,
+		},
+		{
+			name:     "tag exists but is nil",
+			tags:     map[string]*string{"secret-object": nil},
+			key:      "secret-object",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := hasTag(tt.tags, tt.key)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

@@ -27,11 +27,12 @@ const (
 	retryDelay = 5 * time.Second
 	maxRetries = 5 // Maximum retry attempts before dropping
 
-	annotationEnabled        = "azure-keyvault-sync/enabled"
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
-	annotationSecretObjects  = "azure-keyvault-sync/secret-objects"
-	annotationCertObjects    = "azure-keyvault-sync/cert-objects"
-	annotationEnabledValue   = "true"
+	annotationRespectTags    = "azure-keyvault-sync/respect-tags"
+
+	// Label keys for tag filtering
+	labelService     = "service"
+	labelEnvironment = "environment"
 )
 
 // QueueKey represents a namespaced resource name for the work queue
@@ -51,13 +52,6 @@ func parseKey(key QueueKey) (namespace, name string, err error) {
 	return parts[0], parts[1], nil
 }
 
-func isSyncEnabled(obj *secretsstorev1.SecretProviderClass) bool {
-	if obj.Annotations == nil {
-		return false
-	}
-	return obj.Annotations[annotationEnabled] == annotationEnabledValue
-}
-
 func getServiceAccount(obj *secretsstorev1.SecretProviderClass) (string, bool) {
 	if obj.Annotations == nil {
 		return "", false
@@ -66,10 +60,9 @@ func getServiceAccount(obj *secretsstorev1.SecretProviderClass) (string, bool) {
 	return sa, exists
 }
 
+// isValidForSync checks if a SecretProviderClass should be synced
+// The presence of the service-account annotation is an implicit opt-in
 func isValidForSync(obj *secretsstorev1.SecretProviderClass) (bool, string) {
-	if !isSyncEnabled(obj) {
-		return false, ""
-	}
 	serviceAccount, hasServiceAccount := getServiceAccount(obj)
 	if !hasServiceAccount {
 		return false, ""
@@ -134,10 +127,8 @@ func (ctrl *Controller) handleAdded(obj *secretsstorev1.SecretProviderClass) {
 		// Enqueue for reconciliation
 		key := keyFor(namespace, name)
 		ctrl.queue.Add(key)
-	} else if isSyncEnabled(obj) {
-		slog.Warn("Event: ADDED - missing service-account annotation", "namespace", namespace, "name", name)
 	} else {
-		slog.Debug("Event: ADDED - sync disabled", "namespace", namespace, "name", name)
+		slog.Debug("Event: ADDED - no service-account annotation", "namespace", namespace, "name", name)
 	}
 }
 
@@ -146,29 +137,20 @@ func (ctrl *Controller) handleModified(obj *secretsstorev1.SecretProviderClass) 
 	name := obj.Name
 	key := keyFor(namespace, name)
 
-	enabled := isSyncEnabled(obj)
+	valid, serviceAccount := isValidForSync(obj)
 	inCache := ctrl.cache.Has(namespace, name)
 
-	if enabled {
-		// Resource should be synced, enqueue for reconciliation
-		_, hasServiceAccount := getServiceAccount(obj)
-		if hasServiceAccount {
-			slog.Info("Event: MODIFIED - enqueuing", "namespace", namespace, "name", name)
-			ctrl.queue.Add(key)
-		} else {
-			slog.Warn("Event: MODIFIED - missing service-account annotation", "namespace", namespace, "name", name)
-			if inCache {
-				ctrl.cache.Delete(namespace, name)
-				ctrl.printCache()
-			}
-		}
-	} else if !enabled && inCache {
-		// Sync disabled, remove from cache
+	if valid {
+		// Resource has service-account annotation, enqueue for reconciliation
+		slog.Info("Event: MODIFIED - enqueuing", "namespace", namespace, "name", name, "serviceAccount", serviceAccount)
+		ctrl.queue.Add(key)
+	} else if inCache {
+		// Service-account annotation removed, remove from cache
 		slog.Info("Event: MODIFIED - removing from cache", "namespace", namespace, "name", name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
 	} else {
-		slog.Debug("Event: MODIFIED - sync disabled", "namespace", namespace, "name", name)
+		slog.Debug("Event: MODIFIED - no service-account annotation", "namespace", namespace, "name", name)
 	}
 }
 
@@ -278,11 +260,11 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		return fmt.Errorf("missing keyvaultName in spec.parameters")
 	}
 
-	// List secrets from vault (protected by circuit breaker)
-	var secrets []string
+	// List secrets from vault with tags (protected by circuit breaker)
+	var vaultSecrets []azure.VaultSecret
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		secrets, listErr = azure.ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
+		vaultSecrets, listErr = azure.ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -300,16 +282,13 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	}
 
 	slog.Info("Found secrets in vault",
-		    "count", len(secrets), "vault", keyvaultName, "namespace", namespace, "name", name)
-	for _, secret := range secrets {
-		slog.Debug("Vault secret", "name", secret)
-	}
+		    "count", len(vaultSecrets), "vault", keyvaultName, "namespace", namespace, "name", name)
 
-	// List certificates from vault (protected by circuit breaker)
-	var certificates []string
+	// List certificates from vault with tags (protected by circuit breaker)
+	var vaultCertificates []azure.VaultCertificate
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		certificates, listErr = azure.ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
+		vaultCertificates, listErr = azure.ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -327,7 +306,99 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	}
 
 	slog.Info("Found certificates in vault",
-		"count", len(certificates), "vault", keyvaultName, "namespace", namespace, "name", name)
+		"count", len(vaultCertificates), "vault", keyvaultName, "namespace", namespace, "name", name)
+
+	// Apply tag filtering if enabled
+	annotations := obj.Annotations
+	respectTags := annotations != nil && annotations[annotationRespectTags] == "true"
+
+	var secrets []string
+	var certificates []string
+
+	if respectTags {
+		// Extract service and environment labels
+		labels := obj.Labels
+		serviceLabel := ""
+		environmentLabel := ""
+		if labels != nil {
+			serviceLabel = labels[labelService]
+			environmentLabel = labels[labelEnvironment]
+		}
+
+		slog.Info("Tag filtering enabled",
+			"namespace", namespace, "name", name,
+			"serviceLabel", serviceLabel, "environmentLabel", environmentLabel)
+
+		// Create filter config
+		filterConfig := azure.TagFilterConfig{
+			RespectTags:      true,
+			ServiceLabel:     serviceLabel,
+			EnvironmentLabel: environmentLabel,
+		}
+
+		// Filter secrets
+		var rejectedSecrets int
+		for _, vaultSecret := range vaultSecrets {
+			result := azure.MatchesTags(vaultSecret.Tags, filterConfig)
+			if result.Include {
+				secrets = append(secrets, vaultSecret.Name)
+				slog.Debug("Secret included", "name", vaultSecret.Name, "tags", vaultSecret.Tags)
+			} else {
+				rejectedSecrets++
+				slog.Info("Secret rejected by tag filter",
+					"secret", vaultSecret.Name,
+					"vault", keyvaultName,
+					"namespace", namespace,
+					"name", name,
+					"reason", result.Reason,
+					"vaultTags", vaultSecret.Tags,
+					"spcService", serviceLabel,
+					"spcEnvironment", environmentLabel)
+			}
+		}
+
+		// Filter certificates
+		var rejectedCerts int
+		for _, vaultCert := range vaultCertificates {
+			result := azure.MatchesTags(vaultCert.Tags, filterConfig)
+			if result.Include {
+				certificates = append(certificates, vaultCert.Name)
+				slog.Debug("Certificate included", "name", vaultCert.Name, "tags", vaultCert.Tags)
+			} else {
+				rejectedCerts++
+				slog.Info("Certificate rejected by tag filter",
+					"certificate", vaultCert.Name,
+					"vault", keyvaultName,
+					"namespace", namespace,
+					"name", name,
+					"reason", result.Reason,
+					"vaultTags", vaultCert.Tags,
+					"spcService", serviceLabel,
+					"spcEnvironment", environmentLabel)
+			}
+		}
+
+		slog.Info("Tag filtering complete",
+			"namespace", namespace, "name", name,
+			"secretsIncluded", len(secrets), "secretsRejected", rejectedSecrets,
+			"certsIncluded", len(certificates), "certsRejected", rejectedCerts)
+	} else {
+		// Tag filtering disabled - include all secrets and certificates
+		for _, vaultSecret := range vaultSecrets {
+			secrets = append(secrets, vaultSecret.Name)
+		}
+		for _, vaultCert := range vaultCertificates {
+			certificates = append(certificates, vaultCert.Name)
+		}
+
+		slog.Debug("Tag filtering disabled, including all secrets and certificates")
+	}
+
+	slog.Info("Secrets to sync", "count", len(secrets), "vault", keyvaultName, "namespace", namespace, "name", name)
+	for _, secret := range secrets {
+		slog.Debug("Vault secret", "name", secret)
+	}
+	slog.Info("Certificates to sync", "count", len(certificates), "vault", keyvaultName, "namespace", namespace, "name", name)
 	for _, cert := range certificates {
 		slog.Debug("Vault certificate", "name", cert)
 	}
@@ -344,39 +415,77 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		return fmt.Errorf("error formatting objects: %w", err)
 	}
 
-	// Process secretObjects
+	// Process secretObjects - vault tags control K8s Secret generation
+	// Build VaultSecretWithTags and VaultCertWithTags slices with tags
+	var secretsWithTags []update.VaultSecretWithTags
+	var certsWithTags []update.VaultCertWithTags
+
+	// Keep the filtered vault objects with their tags for secretObjects generation
+	for _, vaultSecret := range vaultSecrets {
+		// Only include if it passed tag filtering (or filtering disabled)
+		included := false
+		for _, name := range secrets {
+			if name == vaultSecret.Name {
+				included = true
+				break
+			}
+		}
+		if included {
+			secretsWithTags = append(secretsWithTags, update.VaultSecretWithTags{
+				Name: vaultSecret.Name,
+				Tags: vaultSecret.Tags,
+			})
+		}
+	}
+
+	for _, vaultCert := range vaultCertificates {
+		// Only include if it passed tag filtering (or filtering disabled)
+		included := false
+		for _, name := range certificates {
+			if name == vaultCert.Name {
+				included = true
+				break
+			}
+		}
+		if included {
+			certsWithTags = append(certsWithTags, update.VaultCertWithTags{
+				Name: vaultCert.Name,
+				Tags: vaultCert.Tags,
+			})
+		}
+	}
+
+	slog.Info("Processing secretObjects from vault tags",
+		"namespace", namespace, "name", name,
+		"totalSecrets", len(secretsWithTags),
+		"totalCerts", len(certsWithTags))
+
+	// Generate secretObjects based on vault tags (secret-object=true, cert-object=true)
+	generatedSecretObjects := update.GenerateSecretObjectsFromVault(secretsWithTags, certsWithTags)
+
 	var secretObjectsToSync interface{}
 	var secretObjectsChanged bool
-	annotations := obj.Annotations
-	enableSecretObjects := annotations != nil && annotations[annotationSecretObjects] == annotationEnabledValue
-	enableCertObjects := annotations != nil && annotations[annotationCertObjects] == annotationEnabledValue
 
-	if enableSecretObjects || enableCertObjects {
-		slog.Info("Processing secretObjects",
-			"namespace", namespace, "name", name, "generateSecrets", enableSecretObjects, "generateCerts", enableCertObjects)
-
-		// Generate secretObjects from vault + annotations
-		generatedSecretObjects := update.GenerateSecretObjectsFromVault(
-			secrets,
-			certificates,
-			enableSecretObjects,
-			enableCertObjects,
-		)
-
-		// Check if secretObjects actually changed
+	// Check if secretObjects actually changed
+	if len(generatedSecretObjects) > 0 {
 		if update.CompareSecretObjects(obj, generatedSecretObjects) {
 			secretObjectsToSync = generatedSecretObjects
 			secretObjectsChanged = true
-			slog.Info("SecretObjects changed", "namespace", namespace, "name", name, "existingCount", len(obj.Spec.SecretObjects), "generatedCount", len(generatedSecretObjects))
+			slog.Info("SecretObjects changed", "namespace", namespace, "name", name,
+				"existingCount", len(obj.Spec.SecretObjects),
+				"generatedCount", len(generatedSecretObjects))
 		} else {
-			slog.Info("SecretObjects unchanged", "namespace", namespace, "name", name, "count", len(generatedSecretObjects))
+			slog.Info("SecretObjects unchanged", "namespace", namespace, "name", name,
+				"count", len(generatedSecretObjects))
 		}
 	} else {
-		// Check if field exists and needs removal
+		// No secrets opted into K8s Secret generation - clear secretObjects field if present
 		if len(obj.Spec.SecretObjects) > 0 {
 			secretObjectsToSync = "REMOVE_FIELD"
 			secretObjectsChanged = true
-			slog.Info("Clearing secretObjects field", "namespace", namespace, "name", name, "existingCount", len(obj.Spec.SecretObjects))
+			slog.Info("No secrets opted into K8s Secret generation - clearing secretObjects field",
+				"namespace", namespace, "name", name,
+				"existingCount", len(obj.Spec.SecretObjects))
 		} else {
 			slog.Debug("SecretObjects already empty", "namespace", namespace, "name", name)
 		}
