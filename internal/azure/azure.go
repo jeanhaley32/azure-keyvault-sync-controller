@@ -150,9 +150,15 @@ func (ac *AzureTokenCache) exchangeToken(
 	slog.Debug("Created temporary token file", "path", tmpFilePath)
 
 	// Set environment variables for WorkloadIdentityCredential
-	os.Setenv("AZURE_FEDERATED_TOKEN_FILE", tmpFilePath)
-	os.Setenv("AZURE_CLIENT_ID", clientID)
-	os.Setenv("AZURE_TENANT_ID", tenantID)
+    if err := os.Setenv("AZURE_FEDERATED_TOKEN_FILE", tmpFilePath); err != nil {
+        return "", time.Time{}, fmt.Errorf("failed to set AZURE_FEDERATED_TOKEN_FILE: %w", err)
+    }
+    if err := os.Setenv("AZURE_CLIENT_ID", clientID); err != nil {
+        return "", time.Time{}, fmt.Errorf("failed to set AZURE_CLIENT_ID: %w", err)
+    }
+    if err := os.Setenv("AZURE_TENANT_ID", tenantID); err != nil {
+        return "", time.Time{}, fmt.Errorf("failed to set AZURE_TENANT_ID: %w", err)
+    }
 
 	slog.Debug("Set environment variables for Azure authentication")
 
