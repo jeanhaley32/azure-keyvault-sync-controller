@@ -68,11 +68,11 @@ func (tc *TokenCache) requestToken(ctx context.Context, clientset kubernetes.Int
 		return "", time.Time{}, fmt.Errorf("failed to request token: %w", err)
 	}
 
-	slog.Info("Successfully obtained Kubernetes token",
-		"namespace", namespace, "serviceAccount", serviceAccount,
-		"expiresAt", result.Status.ExpirationTimestamp.Time.Format(time.RFC3339))
+    slog.Info("Successfully obtained Kubernetes token",
+        "namespace", namespace, "serviceAccount", serviceAccount,
+        "expiresAt", result.Status.ExpirationTimestamp.Format(time.RFC3339))
 
-	return result.Status.Token, result.Status.ExpirationTimestamp.Time, nil
+    return result.Status.Token, result.Status.ExpirationTimestamp.Time, nil
 }
 
 // IsTokenValid checks if token exists and hasn't reached renewal threshold

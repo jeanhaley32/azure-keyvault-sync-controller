@@ -402,16 +402,17 @@ func TestGenerateSecretObjectsFromVault(t *testing.T) {
 				}
 			}
 
-			// Verify correct types
-			for _, so := range result {
-				if so.Type == "Opaque" {
-					assert.Len(t, so.Data, 1, "Opaque secrets should have 1 data entry")
-				} else if so.Type == "kubernetes.io/tls" {
-					assert.Len(t, so.Data, 2, "TLS secrets should have 2 data entries (tls.key and tls.crt)")
-					assert.Equal(t, "tls.key", so.Data[0].Key)
-					assert.Equal(t, "tls.crt", so.Data[1].Key)
-				}
-			}
+            // Verify correct types
+            for _, so := range result {
+                switch so.Type {
+                case "Opaque":
+                    assert.Len(t, so.Data, 1, "Opaque secrets should have 1 data entry")
+                case "kubernetes.io/tls":
+                    assert.Len(t, so.Data, 2, "TLS secrets should have 2 data entries (tls.key and tls.crt)")
+                    assert.Equal(t, "tls.key", so.Data[0].Key)
+                    assert.Equal(t, "tls.crt", so.Data[1].Key)
+                }
+            }
 		})
 	}
 }

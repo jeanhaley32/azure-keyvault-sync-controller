@@ -37,20 +37,20 @@ func TestLoadConfig_CustomValues(t *testing.T) {
 	clearEnv()
 
 	// Set custom environment variables
-	os.Setenv("LOG_LEVEL", "DEBUG")
-	os.Setenv("LOG_FORMAT", "json")
-	os.Setenv("SYNC_INTERVAL", "10m")
-	os.Setenv("WORKER_COUNT", "10")
-	os.Setenv("TOKEN_EXPIRATION_SECONDS", "7200")
-	os.Setenv("TOKEN_RENEWAL_THRESHOLD", "0.9")
-	os.Setenv("AZURE_TOKEN_RENEWAL_THRESHOLD", "0.85")
-	os.Setenv("HEALTH_CHECK_PORT", "9090")
-	os.Setenv("KUBERNETES_QPS", "20.0")
-	os.Setenv("KUBERNETES_BURST", "50")
-	os.Setenv("AZURE_CIRCUIT_BREAKER_THRESHOLD", "7")
-	os.Setenv("AZURE_CIRCUIT_BREAKER_TIMEOUT", "2m")
-	os.Setenv("TOKEN_AUDIENCE", "custom://audience")
-	os.Setenv("KEYVAULT_SCOPE", "https://custom.vault.azure.net/.default")
+    _ = os.Setenv("LOG_LEVEL", "DEBUG")
+    _ = os.Setenv("LOG_FORMAT", "json")
+    _ = os.Setenv("SYNC_INTERVAL", "10m")
+    _ = os.Setenv("WORKER_COUNT", "10")
+    _ = os.Setenv("TOKEN_EXPIRATION_SECONDS", "7200")
+    _ = os.Setenv("TOKEN_RENEWAL_THRESHOLD", "0.9")
+    _ = os.Setenv("AZURE_TOKEN_RENEWAL_THRESHOLD", "0.85")
+    _ = os.Setenv("HEALTH_CHECK_PORT", "9090")
+    _ = os.Setenv("KUBERNETES_QPS", "20.0")
+    _ = os.Setenv("KUBERNETES_BURST", "50")
+    _ = os.Setenv("AZURE_CIRCUIT_BREAKER_THRESHOLD", "7")
+    _ = os.Setenv("AZURE_CIRCUIT_BREAKER_TIMEOUT", "2m")
+    _ = os.Setenv("TOKEN_AUDIENCE", "custom://audience")
+    _ = os.Setenv("KEYVAULT_SCOPE", "https://custom.vault.azure.net/.default")
 	defer clearEnv()
 
 	cfg, err := LoadConfig()
@@ -488,11 +488,11 @@ func TestParseIntEnv(t *testing.T) {
 	assert.Equal(t, 42, parseIntEnv("TEST_INT", 42))
 
 	// Test valid value
-	os.Setenv("TEST_INT", "100")
+    _ = os.Setenv("TEST_INT", "100")
 	assert.Equal(t, 100, parseIntEnv("TEST_INT", 42))
 
 	// Test invalid value (should return default)
-	os.Setenv("TEST_INT", "invalid")
+    _ = os.Setenv("TEST_INT", "invalid")
 	assert.Equal(t, 42, parseIntEnv("TEST_INT", 42))
 }
 
@@ -504,11 +504,11 @@ func TestParseFloat32Env(t *testing.T) {
 	assert.Equal(t, float32(3.14), parseFloat32Env("TEST_FLOAT", 3.14))
 
 	// Test valid value
-	os.Setenv("TEST_FLOAT", "2.71")
+    _ = os.Setenv("TEST_FLOAT", "2.71")
 	assert.Equal(t, float32(2.71), parseFloat32Env("TEST_FLOAT", 3.14))
 
 	// Test invalid value (should return default)
-	os.Setenv("TEST_FLOAT", "invalid")
+    _ = os.Setenv("TEST_FLOAT", "invalid")
 	assert.Equal(t, float32(3.14), parseFloat32Env("TEST_FLOAT", 3.14))
 }
 
@@ -520,11 +520,11 @@ func TestParseDurationEnv(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, parseDurationEnv("TEST_DURATION", 5*time.Minute))
 
 	// Test valid value
-	os.Setenv("TEST_DURATION", "10m")
+    _ = os.Setenv("TEST_DURATION", "10m")
 	assert.Equal(t, 10*time.Minute, parseDurationEnv("TEST_DURATION", 5*time.Minute))
 
 	// Test invalid value (should return default)
-	os.Setenv("TEST_DURATION", "invalid")
+    _ = os.Setenv("TEST_DURATION", "invalid")
 	assert.Equal(t, 5*time.Minute, parseDurationEnv("TEST_DURATION", 5*time.Minute))
 }
 
@@ -559,7 +559,7 @@ func clearEnv() {
 		"TOKEN_AUDIENCE", "KEYVAULT_SCOPE",
 		"TEST_INT", "TEST_FLOAT", "TEST_DURATION",
 	}
-	for _, env := range envVars {
-		os.Unsetenv(env)
-	}
+    for _, env := range envVars {
+        _ = os.Unsetenv(env)
+    }
 }
