@@ -31,6 +31,18 @@ func (c *CachedTokenCredential) GetToken(
 	}, nil
 }
 
+// VaultSecret represents a secret from Azure Key Vault with its tags
+type VaultSecret struct {
+	Name string
+	Tags map[string]*string
+}
+
+// VaultCertificate represents a certificate from Azure Key Vault with its tags
+type VaultCertificate struct {
+	Name string
+	Tags map[string]*string
+}
+
 // ExtractKeyvaultName extracts the keyvaultName from a SecretProviderClass spec
 func ExtractKeyvaultName(obj *unstructured.Unstructured) (string, error) {
 	keyvaultName, found, err := unstructured.NestedString(obj.Object, "spec", "parameters", "keyvaultName")
@@ -47,13 +59,13 @@ func ExtractKeyvaultName(obj *unstructured.Unstructured) (string, error) {
 	return keyvaultName, nil
 }
 
-// ListSecrets lists all secrets in the specified Azure Key Vault
+// ListSecrets lists all secrets in the specified Azure Key Vault with their tags
 func ListSecrets(
 	ctx context.Context,
 	vaultName string,
 	token string,
 	expiration time.Time,
-) ([]string, error) {
+) ([]VaultSecret, error) {
 	vaultURL := fmt.Sprintf("https://%s.vault.azure.net", vaultName)
 
 	slog.Debug("Listing secrets from vault", "url", vaultURL)
@@ -71,7 +83,7 @@ func ListSecrets(
 	}
 
 	// List secrets using pager
-	var secrets []string
+	var secrets []VaultSecret
 	pager := client.NewListSecretPropertiesPager(nil)
 
 	for pager.More() {
@@ -97,8 +109,12 @@ func ListSecrets(
 			if secret.Attributes != nil && secret.Attributes.Enabled != nil && *secret.Attributes.Enabled {
 				if secret.ID != nil {
 					secretName := secret.ID.Name()
-					secrets = append(secrets, secretName)
-					slog.Debug("Found enabled secret", "name", secretName)
+					vaultSecret := VaultSecret{
+						Name: secretName,
+						Tags: secret.Tags,
+					}
+					secrets = append(secrets, vaultSecret)
+					slog.Debug("Found enabled secret", "name", secretName, "tags", secret.Tags)
 				}
 			} else {
 				if secret.ID != nil {
@@ -112,13 +128,13 @@ func ListSecrets(
 	return secrets, nil
 }
 
-// ListCertificates lists all certificates in the specified Azure Key Vault
+// ListCertificates lists all certificates in the specified Azure Key Vault with their tags
 func ListCertificates(
 	ctx context.Context,
 	vaultName string,
 	token string,
 	expiration time.Time,
-) ([]string, error) {
+) ([]VaultCertificate, error) {
 	vaultURL := fmt.Sprintf("https://%s.vault.azure.net", vaultName)
 
 	slog.Debug("Listing certificates from vault", "url", vaultURL)
@@ -136,7 +152,7 @@ func ListCertificates(
 	}
 
 	// List certificates using pager
-	var certificates []string
+	var certificates []VaultCertificate
 	pager := client.NewListCertificatePropertiesPager(nil)
 
 	for pager.More() {
@@ -162,8 +178,12 @@ func ListCertificates(
 			if cert.Attributes != nil && cert.Attributes.Enabled != nil && *cert.Attributes.Enabled {
 				if cert.ID != nil {
 					certName := cert.ID.Name()
-					certificates = append(certificates, certName)
-					slog.Debug("Found enabled certificate", "name", certName)
+					vaultCert := VaultCertificate{
+						Name: certName,
+						Tags: cert.Tags,
+					}
+					certificates = append(certificates, vaultCert)
+					slog.Debug("Found enabled certificate", "name", certName, "tags", cert.Tags)
 				}
 			} else {
 				if cert.ID != nil {

@@ -8,9 +8,8 @@ metadata:
   name: example-basic-sync
   namespace: default
   annotations:
-    # Enable automatic sync
-    azure-keyvault-sync/enabled: "true"
     # ServiceAccount to impersonate for vault access
+    # Presence of this annotation enables automatic sync (implicit opt-in)
     azure-keyvault-sync/service-account: "example-app"
 spec:
   provider: azure
