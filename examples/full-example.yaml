@@ -7,24 +7,16 @@ metadata:
   name: example-full
   namespace: default
   annotations:
-    # REQUIRED: Enable automatic sync from Azure Key Vault
-    azure-keyvault-sync/enabled: "true"
-
     # REQUIRED: ServiceAccount to impersonate for vault access
+    # Presence of this annotation enables automatic sync (implicit opt-in)
     # This ServiceAccount must have:
     # - Azure Workload Identity annotation: azure.workload.identity/client-id
     # - Federated Identity Credential configured in Azure
     azure-keyvault-sync/service-account: "example-app"
 
-    # OPTIONAL: Enable automatic Kubernetes Secret generation for vault secrets
-    # Creates Kubernetes Secrets of type: Opaque
-    # Secret name matches vault secret name
-    azure-keyvault-sync/secret-objects: "true"
-
-    # OPTIONAL: Enable automatic Kubernetes TLS Secret generation for vault certificates
-    # Creates Kubernetes Secrets of type: kubernetes.io/tls
-    # Contains tls.key and tls.crt from the certificate
-    azure-keyvault-sync/cert-objects: "true"
+    # OPTIONAL: Enable tag-based filtering to selectively sync secrets
+    # Requires 'service' label on SPC, optional 'environment' label
+    # azure-keyvault-sync/respect-tags: "true"
 
     # AUTO-POPULATED: Last successful sync timestamp (set by controller)
     # azure-keyvault-sync/last-sync: "2025-10-27T00:00:00Z"
@@ -57,23 +49,30 @@ spec:
     #       objectVersion: ""
     objects: ""
 
-  # secretObjects array - AUTO-POPULATED by controller (if annotations enabled)
-  # Controller generates Kubernetes Secret definitions based on vault contents.
+  # secretObjects array - AUTO-POPULATED by controller based on vault tags
+  # Controller generates Kubernetes Secret definitions ONLY for vault items tagged with:
+  #   - secret-object="true" (creates type: Opaque)
+  #   - cert-object="true" (creates type: kubernetes.io/tls)
   # CSI driver uses this to automatically create Secrets in the namespace.
+  #
+  # Tag secrets in Azure:
+  #   az keyvault secret set-attributes --vault-name example-vault --name db-password --tags secret-object=true
+  #   az keyvault certificate set-attributes --vault-name example-vault --name tls-cert --tags cert-object=true
+  #
   # Format after population:
   # secretObjects:
-  #   - secretName: secret-name
+  #   - secretName: db-password
   #     type: Opaque
   #     data:
-  #       - key: secret-name
-  #         objectName: secret-name
-  #   - secretName: cert-name
+  #       - key: db-password
+  #         objectName: db-password
+  #   - secretName: tls-cert
   #     type: kubernetes.io/tls
   #     data:
   #       - key: tls.key
-  #         objectName: cert-name
+  #         objectName: tls-cert
   #       - key: tls.crt
-  #         objectName: cert-name
+  #         objectName: tls-cert
   secretObjects: []
 
 ---

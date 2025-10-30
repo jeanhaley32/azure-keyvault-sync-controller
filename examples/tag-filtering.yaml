@@ -1,0 +1,108 @@
+# Tag Filtering Example
+#
+# This example demonstrates how to use tag-based filtering to selectively sync secrets
+# from a shared Azure Key Vault based on service and environment tags.
+#
+# Prerequisites:
+# 1. Tag your secrets in Azure Key Vault:
+#
+#    # Production web-api secrets
+#    az keyvault secret set-attributes \
+#      --vault-name shared-vault \
+#      --name db-password \
+#      --tags service=web-api environment=production secret-object=true
+#
+#    az keyvault secret set-attributes \
+#      --vault-name shared-vault \
+#      --name cache-password \
+#      --tags service=web-api environment=production
+#
+#    # Staging web-api secret (will be rejected by this SPC)
+#    az keyvault secret set-attributes \
+#      --vault-name shared-vault \
+#      --name db-password-staging \
+#      --tags service=web-api environment=staging
+#
+#    # Environment-agnostic secret (will be included)
+#    az keyvault secret set-attributes \
+#      --vault-name shared-vault \
+#      --name api-key \
+#      --tags service=web-api
+#
+#    # Different service secret (will be rejected)
+#    az keyvault secret set-attributes \
+#      --vault-name shared-vault \
+#      --name mobile-secret \
+#      --tags service=mobile-api environment=production
+#
+# 2. Create Kubernetes ServiceAccount with Azure Workload Identity:
+#
+#    kubectl create serviceaccount web-api -n production
+#    kubectl annotate serviceaccount web-api -n production \
+#      azure.workload.identity/client-id=00000000-0000-0000-0000-000000000000
+#
+# 3. Configure Federated Identity Credential in Azure linking the ServiceAccount
+#    to a Managed Identity with Key Vault RBAC permissions
+
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: web-api-secrets
+  namespace: production
+  labels:
+    service: web-api          # Required: matches vault 'service' tag
+    environment: production    # Optional: matches vault 'environment' tag
+  annotations:
+    # ServiceAccount to impersonate for vault access
+    # Presence of this annotation enables automatic sync (implicit opt-in)
+    azure-keyvault-sync/service-account: "web-api"
+
+    # Enable tag-based filtering
+    azure-keyvault-sync/respect-tags: "true"
+
+    # Last sync timestamp (automatically set by controller)
+    # azure-keyvault-sync/last-sync: "2025-10-29T12:34:56Z"
+spec:
+  provider: azure
+  parameters:
+    # Shared vault containing secrets for multiple services
+    keyvaultName: "shared-vault"
+
+    # Azure Workload Identity configuration
+    clientID: "00000000-0000-0000-0000-000000000000"  # Replace with your Managed Identity client ID
+    tenantId: "72f988bf-86f1-41af-91ab-2d7cd011db47"  # Replace with your Azure AD tenant ID
+
+    # Will be auto-populated by controller based on tag filtering results
+    objects: ""
+
+  # Will be auto-populated by controller based on vault secret-object/cert-object tags
+  # Only secrets with secret-object="true" will be added here
+  secretObjects: []
+
+---
+# Expected Results:
+#
+# After controller reconciles this SecretProviderClass:
+#
+# spec.parameters.objects will contain:
+#   - api-key (service match, no environment - env-agnostic)
+#   - cache-password (service + environment match)
+#   - db-password (service + environment match)
+#
+# spec.secretObjects will contain:
+#   - db-password (has secret-object=true tag)
+#
+# NOT included (rejected by tag filtering):
+#   - db-password-staging (environment mismatch: staging != production)
+#   - mobile-secret (service mismatch: mobile-api != web-api)
+#
+# Tag Filtering Logic:
+# 1. Service tag MUST match (required)
+# 2. Environment tag must match IF present in vault secret
+# 3. Secrets without environment tag are environment-agnostic (shared)
+# 4. Only secrets that pass filtering are evaluated for secret-object/cert-object tags
+#
+# For complete documentation, see:
+# - docs/design/tag-filtering-decision-tree.md
+# - README.md#tag-filtering
