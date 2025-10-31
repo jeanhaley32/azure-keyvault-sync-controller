@@ -315,3 +315,40 @@ func newMinimalController() *Controller {
 		watchNamespace:      "",
 	}
 }
+
+// TestPrintCache tests the printCache debug function
+func TestPrintCache(t *testing.T) {
+	t.Run("prints empty cache", func(t *testing.T) {
+		// Create controller with empty cache
+		ctrl := newMinimalController()
+		defer ctrl.queue.ShutDown()
+
+		// printCache should not panic with empty cache
+		assert.NotPanics(t, func() {
+			ctrl.printCache()
+		})
+	})
+
+	t.Run("prints cache with objects", func(t *testing.T) {
+		// Create controller with some cached objects
+		ctrl := newMinimalController()
+		defer ctrl.queue.ShutDown()
+
+		// Add test objects to cache using Set method
+		obj1 := &secretsstorev1.SecretProviderClass{}
+		obj1.Namespace = "default"
+		obj1.Name = "test-spc-1"
+
+		obj2 := &secretsstorev1.SecretProviderClass{}
+		obj2.Namespace = "kube-system"
+		obj2.Name = "test-spc-2"
+
+		ctrl.cache.Set("default", "test-spc-1", obj1)
+		ctrl.cache.Set("kube-system", "test-spc-2", obj2)
+
+		// printCache should not panic with objects
+		assert.NotPanics(t, func() {
+			ctrl.printCache()
+		})
+	})
+}
