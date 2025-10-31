@@ -83,8 +83,8 @@ func TestCircuitBreaker_HalfOpenAfterTimeout(t *testing.T) {
 	cb := NewCircuitBreaker(maxFailures, resetTimeout)
 
 	// Open the circuit
-	for i := 0; i < maxFailures; i++ {
-		cb.Call(func() error {
+    for i := 0; i < maxFailures; i++ {
+        _ = cb.Call(func() error {
 			return errors.New("fail")
 		})
 	}
@@ -112,8 +112,8 @@ func TestCircuitBreaker_HalfOpenToOpen(t *testing.T) {
 	cb := NewCircuitBreaker(maxFailures, resetTimeout)
 
 	// Open the circuit
-	for i := 0; i < maxFailures; i++ {
-		cb.Call(func() error {
+    for i := 0; i < maxFailures; i++ {
+        _ = cb.Call(func() error {
 			return errors.New("fail")
 		})
 	}
@@ -137,8 +137,8 @@ func TestCircuitBreaker_SuccessResetsFailureCount(t *testing.T) {
 	cb := NewCircuitBreaker(5, 1*time.Minute)
 
 	// Record some failures
-	for i := 0; i < 3; i++ {
-		cb.Call(func() error {
+    for i := 0; i < 3; i++ {
+        _ = cb.Call(func() error {
 			return errors.New("fail")
 		})
 	}
@@ -158,8 +158,8 @@ func TestCircuitBreaker_OpenStateFastFail(t *testing.T) {
 	cb := NewCircuitBreaker(2, 1*time.Second)
 
 	// Open the circuit
-	cb.Call(func() error { return errors.New("fail") })
-	cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
 	assert.Equal(t, "open", cb.State())
 
 	// Multiple calls should all fail fast
@@ -183,8 +183,8 @@ func TestCircuitBreaker_RemainingTimeInError(t *testing.T) {
 	cb := NewCircuitBreaker(2, resetTimeout)
 
 	// Open the circuit
-	cb.Call(func() error { return errors.New("fail") })
-	cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
 
 	// Immediately try to call - error should indicate remaining time
 	err := cb.Call(func() error {
@@ -199,8 +199,8 @@ func TestCircuitBreaker_ManualReset(t *testing.T) {
 	cb := NewCircuitBreaker(2, 1*time.Minute)
 
 	// Open the circuit
-	cb.Call(func() error { return errors.New("fail") })
-	cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
 	assert.Equal(t, "open", cb.State())
 	assert.Equal(t, 2, cb.Failures())
 
@@ -232,7 +232,7 @@ func TestCircuitBreaker_ConcurrentCalls(t *testing.T) {
 			defer wg.Done()
 
 			// Alternate between success and failure
-			err := cb.Call(func() error {
+            err := cb.Call(func() error {
 				time.Sleep(10 * time.Millisecond) // Simulate work
 				if id%2 == 0 {
 					return nil
@@ -280,7 +280,7 @@ func TestCircuitBreaker_RaceCondition(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			cb.Call(func() error {
+            _ = cb.Call(func() error {
 				if id%3 == 0 {
 					return errors.New("fail")
 				}
@@ -302,7 +302,7 @@ func TestCircuitBreaker_MultipleHalfOpenAttempts(t *testing.T) {
 
 	// Open the circuit
 	for i := 0; i < maxFailures; i++ {
-		cb.Call(func() error { return errors.New("fail") })
+        _ = cb.Call(func() error { return errors.New("fail") })
 	}
 	assert.Equal(t, "open", cb.State())
 
@@ -332,26 +332,26 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 	assert.Equal(t, "closed", cb.State())
 
 	// closed → closed (success)
-	cb.Call(func() error { return nil })
+    _ = cb.Call(func() error { return nil })
 	assert.Equal(t, "closed", cb.State())
 
 	// closed → closed (first failure)
-	cb.Call(func() error { return errors.New("fail 1") })
+    _ = cb.Call(func() error { return errors.New("fail 1") })
 	assert.Equal(t, "closed", cb.State())
 
 	// closed → open (second failure)
-	cb.Call(func() error { return errors.New("fail 2") })
+    _ = cb.Call(func() error { return errors.New("fail 2") })
 	assert.Equal(t, "open", cb.State())
 
 	// open → open (fast fail before timeout)
-	cb.Call(func() error { return nil })
+    _ = cb.Call(func() error { return nil })
 	assert.Equal(t, "open", cb.State())
 
 	// Wait for timeout
 	time.Sleep(150 * time.Millisecond)
 
 	// open → half-open → closed (success after timeout)
-	cb.Call(func() error { return nil })
+    _ = cb.Call(func() error { return nil })
 	assert.Equal(t, "closed", cb.State())
 }
 
@@ -361,12 +361,12 @@ func TestCircuitBreaker_ExactThreshold(t *testing.T) {
 
 	// Should stay closed for maxFailures - 1
 	for i := 0; i < maxFailures-1; i++ {
-		cb.Call(func() error { return errors.New("fail") })
+        _ = cb.Call(func() error { return errors.New("fail") })
 		assert.Equal(t, "closed", cb.State(), "circuit should still be closed")
 	}
 
 	// Exactly maxFailures should open it
-	cb.Call(func() error { return errors.New("fail") })
+    _ = cb.Call(func() error { return errors.New("fail") })
 	assert.Equal(t, "open", cb.State(), "circuit should be open after exactly maxFailures")
 }
 
@@ -374,16 +374,16 @@ func TestCircuitBreaker_ZeroFailuresAfterSuccess(t *testing.T) {
 	cb := NewCircuitBreaker(5, 1*time.Minute)
 
 	// Accumulate failures
-	cb.Call(func() error { return errors.New("fail 1") })
-	cb.Call(func() error { return errors.New("fail 2") })
-	cb.Call(func() error { return errors.New("fail 3") })
+    _ = cb.Call(func() error { return errors.New("fail 1") })
+    _ = cb.Call(func() error { return errors.New("fail 2") })
+    _ = cb.Call(func() error { return errors.New("fail 3") })
 	assert.Equal(t, 3, cb.Failures())
 
 	// Success should reset to zero
-	cb.Call(func() error { return nil })
+    _ = cb.Call(func() error { return nil })
 	assert.Equal(t, 0, cb.Failures())
 
 	// New failure should start counting from 0 again
-	cb.Call(func() error { return errors.New("fail 4") })
+    _ = cb.Call(func() error { return errors.New("fail 4") })
 	assert.Equal(t, 1, cb.Failures())
 }
