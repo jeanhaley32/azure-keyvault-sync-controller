@@ -27,3 +27,6 @@ azure-keyvault-sync-controller
 # OS files
 .DS_Store
 /controller
+
+# Local session state (for AI assistant continuity)
+.session-state.md
