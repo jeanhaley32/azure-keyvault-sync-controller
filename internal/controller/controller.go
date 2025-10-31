@@ -81,6 +81,11 @@ type Controller struct {
 	config              *config.Config
 	watchNamespace      string          // Empty = cluster-wide, set = namespace-scoped
 	azureCircuitBreaker *circuitbreaker.CircuitBreaker // Protects against Azure API failures
+
+	// Injected dependencies for testability
+	tokenProvider TokenProvider
+	vaultClient   VaultClient
+	patchClient   PatchClient
 }
 
 func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *config.Config, watchNamespace string) *Controller {
@@ -94,17 +99,29 @@ func NewController(client spcclient.Interface, clientset kubernetes.Interface, c
 		"threshold", config.AzureCircuitBreakerThreshold,
 		"timeout", config.AzureCircuitBreakerTimeout)
 
+	// Create caches
+	tokenCache := token.NewTokenCache()
+	azureTokenCache := azure.NewAzureTokenCache()
+
+	// Create real implementations of interfaces
+	tokenProvider := NewRealTokenProvider(tokenCache, azureTokenCache)
+	vaultClient := NewRealVaultClient()
+	patchClient := NewRealPatchClient(client)
+
 	return &Controller{
 		client:              client,
 		clientset:           clientset,
 		cache:               cache.NewCache(),
-		tokenCache:          token.NewTokenCache(),
-		azureTokenCache:     azure.NewAzureTokenCache(),
+		tokenCache:          tokenCache,
+		azureTokenCache:     azureTokenCache,
 		queue:               workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[QueueKey]()),
 		HealthChecker:       health.NewHealthChecker(),
 		config:              config,
 		watchNamespace:      watchNamespace,
 		azureCircuitBreaker: azureCB,
+		tokenProvider:       tokenProvider,
+		vaultClient:         vaultClient,
+		patchClient:         patchClient,
 	}
 }
 
@@ -211,7 +228,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	}
 
 	// Get Kubernetes token
-	token, err := ctrl.tokenCache.GetToken(
+	token, err := ctrl.tokenProvider.GetK8sToken(
 		ctx,
 		ctrl.clientset,
 		namespace,
@@ -235,7 +252,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	}
 
 	// Get Azure AD token
-	azureToken, azureTokenExpiration, err := ctrl.azureTokenCache.GetToken(
+	azureToken, azureTokenExpiration, err := ctrl.tokenProvider.GetAzureToken(
 		ctx,
 		namespace,
 		serviceAccount,
@@ -264,7 +281,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	var vaultSecrets []azure.VaultSecret
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		vaultSecrets, listErr = azure.ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
+		vaultSecrets, listErr = ctrl.vaultClient.ListSecrets(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -288,7 +305,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	var vaultCertificates []azure.VaultCertificate
 	err = ctrl.azureCircuitBreaker.Call(func() error {
 		var listErr error
-		vaultCertificates, listErr = azure.ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
+		vaultCertificates, listErr = ctrl.vaultClient.ListCertificates(ctx, keyvaultName, azureToken, azureTokenExpiration)
 		return listErr
 	})
 	if err != nil {
@@ -507,9 +524,8 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	timestamp := time.Now().Format(time.RFC3339)
 	slog.Info("Changes detected - applying patch",
 		    "namespace", namespace, "name", name, "objectsChanged", objectsChanged, "secretObjectsChanged", secretObjectsChanged)
-	err = update.PatchSecretProviderClass(
+	err = ctrl.patchClient.PatchSecretProviderClass(
 		ctx,
-		ctrl.client,
 		namespace,
 		name,
 		newObjects,
