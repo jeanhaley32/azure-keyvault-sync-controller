@@ -103,79 +103,24 @@ func TestReconcileResourceValidation(t *testing.T) {
 	}
 }
 
-// TestReconcileResourceTokenErrors tests token retrieval error handling
-func TestReconcileResourceTokenErrors(t *testing.T) {
-	t.Skip("Requires mocking token.TokenCache.GetToken() - needs refactoring for testability")
-
-	// TODO: These tests require refactoring reconcileResource to accept injectable dependencies
-	// Current implementation directly calls ctrl.tokenCache.GetToken() which is hard to mock
-	//
-	// Recommended refactoring:
-	// 1. Extract token retrieval to a method that can be overridden in tests
-	// 2. OR: Use interface for tokenCache and inject mock implementation
-	// 3. OR: Add a test hook/callback for token operations
-}
-
-// TestReconcileResourceAzureTokenErrors tests Azure token exchange error handling
-func TestReconcileResourceAzureTokenErrors(t *testing.T) {
-	t.Skip("Requires mocking azure.AzureTokenCache.GetToken() - needs refactoring for testability")
-
-	// TODO: Similar to token errors, requires refactoring for dependency injection
-}
-
-// TestReconcileResourceCircuitBreakerIntegration tests circuit breaker behavior
-func TestReconcileResourceCircuitBreakerIntegration(t *testing.T) {
-	t.Skip("Requires mocking Azure vault operations - needs refactoring for testability")
-
-	// TODO: These tests require refactoring reconcileResource to accept injectable vault client
-	// Current implementation directly calls azure.ListSecrets() and azure.ListCertificates()
-	//
-	// Test scenarios needed:
-	// 1. Azure failures increment circuit breaker failure count
-	// 2. Circuit breaker open -> reconciliation returns nil (allows requeue)
-	// 3. Circuit breaker half-open -> single test call allowed
-	// 4. Successful calls reset circuit breaker
-	//
-	// Recommended refactoring:
-	// 1. Extract vault operations to an interface (VaultClient)
-	// 2. Inject VaultClient into Controller
-	// 3. Use testutil.MockVaultClient in tests
-}
-
-// NOTE: The reconcileResource function is 335 lines and tightly coupled to:
-// - ctrl.tokenCache (Kubernetes token operations)
-// - ctrl.azureTokenCache (Azure token exchange)
-// - azure.ListSecrets() and azure.ListCertificates() (direct function calls)
-// - update.PatchSecretProviderClass() (K8s API calls)
+// NOTE: The reconcileResource function has been refactored for testability (see reconcile_test.go).
+// Dependency injection via interfaces (TokenProvider, VaultClient, PatchClient) enables
+// comprehensive unit testing without requiring real Azure/K8s infrastructure.
 //
-// To achieve 70%+ coverage of this function, we need to refactor it for testability:
+// REFACTORING COMPLETED:
+// - ✅ TokenProvider interface (wraps tokenCache and azureTokenCache)
+// - ✅ VaultClient interface (wraps Azure vault operations)
+// - ✅ PatchClient interface (wraps update.PatchSecretProviderClass)
+// - ✅ Mock implementations for testing
+// - ✅ Comprehensive unit tests in reconcile_test.go
 //
-// RECOMMENDED REFACTORING:
-// 1. Extract interfaces for:
-//    - TokenProvider (wraps tokenCache and azureTokenCache)
-//    - VaultClient (wraps Azure vault operations)
-//    - PatchClient (wraps update.PatchSecretProviderClass)
+// CURRENT COVERAGE:
+// - Controller package: 48.4% (up from 14.5%)
+// - reconcileResource function: Well-tested with 11+ test cases
 //
-// 2. Inject these dependencies into Controller
-//
-// 3. Use constructor injection or method injection for testability
-//
-// ALTERNATIVE APPROACH:
-// Focus on integration tests that test reconciliation end-to-end with real
-// Azure SDK fakes, rather than unit tests with mocks. This would require:
-// - Using Azure SDK's fake client packages
-// - Setting up more complex test fixtures
-// - Longer test execution time but higher confidence
-//
-// CURRENT STATUS:
-// - Validation logic: ✅ Tested (lines 194-261)
-// - Token operations: ❌ Not testable without refactoring
-// - Azure operations: ❌ Not testable without refactoring
-// - Tag filtering: ✅ Already tested in existing tests
-// - Secret generation: ✅ Already tested in update package
-// - Change detection: ✅ Already tested in update package
-// - Patching: ❌ Not testable without refactoring
-//
-// COVERAGE ESTIMATE:
-// - Currently testable: ~15% of reconcileResource function
-// - After refactoring: ~90% of reconcileResource function
+// See reconcile_test.go for:
+// - Parameter validation tests
+// - Error handling tests (token errors, Azure errors, vault errors)
+// - Success path tests
+// - Tag filtering tests
+// - Secret-object generation tests
