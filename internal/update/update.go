@@ -124,6 +124,7 @@ func PatchSecretProviderClass(
 	name string,
 	objectsYAML string,
 	secretObjects interface{},
+	annotations map[string]string,
 	timestamp string,
 ) error {
 	slog.Info("Patching SecretProviderClass", "namespace", namespace, "name", name)
@@ -142,6 +143,21 @@ func PatchSecretProviderClass(
 			"value": timestamp,
 		},
 	}
+
+	// Add per-secret annotations from vault tags
+	for key, value := range annotations {
+		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "/", "~1")
+		escapedKey = strings.ReplaceAll(escapedKey, "~", "~0")
+		patch = append(patch, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations/" + escapedKey,
+			"value": value,
+		})
+	}
+
+	slog.Info("Adding annotations to SPC",
+		"namespace", namespace, "name", name, "annotationCount", len(annotations))
 
 	// Handle secretObjects field
 	if secretObjects != nil {

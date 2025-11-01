@@ -59,13 +59,13 @@ func (m *MockVaultClient) ListCertificates(ctx context.Context, vaultName, token
 
 // MockPatchClient is a mock implementation of PatchClient for testing
 type MockPatchClient struct {
-	PatchSecretProviderClassFunc func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error
+	PatchSecretProviderClassFunc func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error
 }
 
 // PatchSecretProviderClass calls the mock function
-func (m *MockPatchClient) PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+func (m *MockPatchClient) PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 	if m.PatchSecretProviderClassFunc != nil {
-		return m.PatchSecretProviderClassFunc(ctx, namespace, name, objectsYAML, secretObjects, timestamp)
+		return m.PatchSecretProviderClassFunc(ctx, namespace, name, objectsYAML, secretObjects, annotations, timestamp)
 	}
 	return nil
 }

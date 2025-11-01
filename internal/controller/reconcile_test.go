@@ -192,7 +192,7 @@ func TestReconcileResource_SuccessfulReconciliation(t *testing.T) {
 	var patchedNamespace, patchedName, patchedObjects string
 
 	ctrl.patchClient = &MockPatchClient{
-		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 			patchedNamespace = namespace
 			patchedName = name
 			patchedObjects = objectsYAML
@@ -218,7 +218,7 @@ func TestReconcileResource_NoChangesDetected(t *testing.T) {
 	// Capture the generated YAML so we can match it exactly
 	var generatedYAML string
 	ctrl.patchClient = &MockPatchClient{
-		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 			generatedYAML = objectsYAML
 			return nil
 		},
@@ -234,7 +234,7 @@ func TestReconcileResource_NoChangesDetected(t *testing.T) {
 	spc.Spec.Parameters["objects"] = generatedYAML
 	patchCalled := false
 	ctrl.patchClient = &MockPatchClient{
-		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 			patchCalled = true
 			return nil
 		},
@@ -277,7 +277,7 @@ func TestReconcileResource_TagFiltering(t *testing.T) {
 
 	var patchedObjects string
 	ctrl.patchClient = &MockPatchClient{
-		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 			patchedObjects = objectsYAML
 			return nil
 		},
@@ -317,7 +317,7 @@ func TestReconcileResource_SecretObjectGeneration(t *testing.T) {
 
 	var patchedSecretObjects interface{}
 	ctrl.patchClient = &MockPatchClient{
-		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+		PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 			patchedSecretObjects = secretObjects
 			return nil
 		},

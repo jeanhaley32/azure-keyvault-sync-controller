@@ -484,6 +484,29 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	// Generate secretObjects based on vault tags (secret-object=true, cert-object=true)
 	generatedSecretObjects := update.GenerateSecretObjectsFromVault(secretsWithTags, certsWithTags)
 
+	// Collect annotations from vault tags (k8s-annotation. prefix)
+	spcAnnotations := make(map[string]string)
+	for _, vaultSecret := range vaultSecrets {
+		// Only process secrets that passed tag filtering
+		included := false
+		for _, name := range secrets {
+			if name == vaultSecret.Name {
+				included = true
+				break
+			}
+		}
+		if included {
+			secretAnnotations := azure.TransformTagsToSPCAnnotations(vaultSecret.Name, vaultSecret.Tags)
+			for k, v := range secretAnnotations {
+				spcAnnotations[k] = v
+			}
+		}
+	}
+
+	slog.Info("Collected annotations from vault tags",
+		"namespace", namespace, "name", name,
+		"annotationCount", len(spcAnnotations))
+
 	var secretObjectsToSync interface{}
 	var secretObjectsChanged bool
 
@@ -534,6 +557,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		name,
 		newObjects,
 		secretObjectsToSync,
+		spcAnnotations,
 		timestamp,
 	)
 	if err != nil {
