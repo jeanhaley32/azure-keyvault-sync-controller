@@ -10,14 +10,18 @@ import (
 	"syscall"
 	"time"
 
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/config"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/controller"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/health"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/logger"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 func main() {
@@ -80,6 +84,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup scheme with our CRD types
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		slog.Error("Error adding client-go scheme", "error", err)
+		os.Exit(1)
+	}
+	if err := akvv1alpha1.AddToScheme(scheme); err != nil {
+		slog.Error("Error adding AzureKeyVaultSync scheme", "error", err)
+		os.Exit(1)
+	}
+
+	// Create controller-runtime manager (provides client and cache)
+	mgr, err := ctrl.NewManager(config, ctrl.Options{
+		Scheme: scheme,
+	})
+	if err != nil {
+		slog.Error("Error creating controller-runtime manager", "error", err)
+		os.Exit(1)
+	}
+
 	// Read watch namespace from environment (empty = cluster-wide for backward compatibility)
 	watchNamespace := os.Getenv("WATCH_NAMESPACE")
 	if watchNamespace != "" {
@@ -88,7 +112,7 @@ func main() {
 		slog.Info("Cluster-wide mode enabled (watching all namespaces)")
 	}
 
-	controller := controller.NewController(spcClientset, clientset, cfg, watchNamespace)
+	controller := controller.NewController(spcClientset, clientset, mgr.GetClient(), cfg, watchNamespace)
 
 	// Start health check server
 	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
@@ -106,6 +130,15 @@ func main() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+
+	// Start controller-runtime manager in goroutine
+	managerDone := make(chan struct{})
+	go func() {
+		defer close(managerDone)
+		if err := mgr.Start(ctx); err != nil {
+			slog.Error("Controller-runtime manager error", "error", err)
+		}
+	}()
 
 	// Start controller in goroutine
 	controllerDone := make(chan struct{})

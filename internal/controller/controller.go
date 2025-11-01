@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/cache"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/circuitbreaker"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -73,6 +75,7 @@ func isValidForSync(obj *secretsstorev1.SecretProviderClass) (bool, string) {
 type Controller struct {
 	client              spcclient.Interface
 	clientset           kubernetes.Interface
+	ctrlClient          client.Client // Controller-runtime client for CRD access
 	cache               *cache.SecretProviderClassCache
 	tokenCache          *token.TokenCache
 	azureTokenCache     *azure.AzureTokenCache
@@ -88,7 +91,7 @@ type Controller struct {
 	patchClient   PatchClient
 }
 
-func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *config.Config, watchNamespace string) *Controller {
+func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface, ctrlClient client.Client, config *config.Config, watchNamespace string) *Controller {
 	// Initialize circuit breaker for Azure API protection
 	azureCB := circuitbreaker.NewCircuitBreaker(
 		config.AzureCircuitBreakerThreshold,
@@ -106,11 +109,12 @@ func NewController(client spcclient.Interface, clientset kubernetes.Interface, c
 	// Create real implementations of interfaces
 	tokenProvider := NewRealTokenProvider(tokenCache, azureTokenCache)
 	vaultClient := NewRealVaultClient()
-	patchClient := NewRealPatchClient(client)
+	patchClient := NewRealPatchClient(spcClient)
 
 	return &Controller{
-		client:              client,
+		client:              spcClient,
 		clientset:           clientset,
+		ctrlClient:          ctrlClient,
 		cache:               cache.NewCache(),
 		tokenCache:          tokenCache,
 		azureTokenCache:     azureTokenCache,
@@ -713,6 +717,298 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 	return nil
 }
 
+// watchAzureKeyVaultSync watches AzureKeyVaultSync CRDs and reconciles them
+func (ctrl *Controller) watchAzureKeyVaultSync(ctx context.Context) {
+	slog.Info("Starting AzureKeyVaultSync CRD watcher")
+
+	// Use a ticker for periodic reconciliation
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("AzureKeyVaultSync watcher shutting down")
+			return
+		case <-ticker.C:
+			// List all AzureKeyVaultSync resources
+			var akvList akvv1alpha1.AzureKeyVaultSyncList
+			listOpts := []client.ListOption{}
+
+			// Apply namespace filter if configured
+			if ctrl.watchNamespace != "" {
+				listOpts = append(listOpts, client.InNamespace(ctrl.watchNamespace))
+			}
+
+			if err := ctrl.ctrlClient.List(ctx, &akvList, listOpts...); err != nil {
+				slog.Error("Failed to list AzureKeyVaultSync resources", "error", err)
+				continue
+			}
+
+			slog.Debug("Found AzureKeyVaultSync resources", "count", len(akvList.Items))
+
+			// Reconcile each resource
+			for _, akv := range akvList.Items {
+				if err := ctrl.reconcileAzureKeyVaultSync(ctx, &akv); err != nil {
+					slog.Error("Failed to reconcile AzureKeyVaultSync",
+						"namespace", akv.Namespace,
+						"name", akv.Name,
+						"error", err)
+				}
+			}
+		}
+	}
+}
+
+// generateSecretProviderClass creates a SecretProviderClass from an AzureKeyVaultSync resource
+func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []azure.VaultSecret) *secretsstorev1.SecretProviderClass {
+	// Build array of secret objects for the SPC
+	var objects []map[string]interface{}
+	secretObjectCount := 0
+
+	for _, secret := range secrets {
+		// Check if this secret has the secret-object tag
+		hasSecretObjectTag := false
+		if secret.Tags != nil {
+			if tagValue, exists := secret.Tags["secret-object"]; exists && tagValue != nil && *tagValue == "true" {
+				hasSecretObjectTag = true
+				secretObjectCount++
+			}
+		}
+
+		// Create the object entry
+		obj := map[string]interface{}{
+			"objectName": secret.Name,
+			"objectType": "secret",
+		}
+
+		// Add secretObject configuration if the tag is present
+		if hasSecretObjectTag {
+			obj["objectAlias"] = secret.Name
+		}
+
+		objects = append(objects, obj)
+	}
+
+	// Build parameters map
+	parameters := map[string]string{
+		"keyvaultName": akv.Spec.KeyvaultName,
+		"tenantId":     akv.Spec.TenantID,
+		"clientID":     akv.Spec.ClientID,
+	}
+
+	spc := &secretsstorev1.SecretProviderClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      akv.Name, // SPC name matches CRD name
+			Namespace: akv.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: akv.APIVersion,
+					Kind:       akv.Kind,
+					Name:       akv.Name,
+					UID:        akv.UID,
+					Controller: boolPtr(true),
+					// Set based on deletePolicy
+					BlockOwnerDeletion: boolPtr(akv.Spec.DeletePolicy == akvv1alpha1.DeletePolicyCascade),
+				},
+			},
+		},
+		Spec: secretsstorev1.SecretProviderClassSpec{
+			Provider:   "azure",
+			Parameters: parameters,
+		},
+	}
+
+	// Add objects array to parameters as YAML/JSON
+	// The CSI driver expects this as a YAML string
+	if len(objects) > 0 {
+		// For now, we'll build a simple array string
+		// In production, this should be proper YAML marshaling
+		spc.Spec.Parameters["objects"] = buildObjectsArrayString(objects)
+	}
+
+	return spc
+}
+
+// buildObjectsArrayString builds the objects array string for SPC parameters
+func buildObjectsArrayString(objects []map[string]interface{}) string {
+	// This is a simplified version - in production use proper YAML marshaling
+	result := "array:\n"
+	for _, obj := range objects {
+		result += "  - |\n"
+		result += fmt.Sprintf("    objectName: %s\n", obj["objectName"])
+		result += fmt.Sprintf("    objectType: %s\n", obj["objectType"])
+		if alias, exists := obj["objectAlias"]; exists {
+			result += fmt.Sprintf("    objectAlias: %s\n", alias)
+		}
+	}
+	return result
+}
+
+// boolPtr returns a pointer to a bool value
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// reconcileAzureKeyVaultSync reconciles a single AzureKeyVaultSync resource
+func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akvv1alpha1.AzureKeyVaultSync) error {
+	namespace := akv.Namespace
+	name := akv.Name
+
+	slog.Info("Reconciling AzureKeyVaultSync",
+		"namespace", namespace,
+		"name", name,
+		"vault", akv.Spec.KeyvaultName)
+
+	// Step 1: Get Kubernetes token for the service account
+	k8sToken, err := ctrl.tokenProvider.GetK8sToken(
+		ctx,
+		ctrl.clientset,
+		namespace,
+		akv.Spec.ServiceAccount,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get Kubernetes token: %w", err)
+	}
+
+	// Step 2: Exchange for Azure AD token
+	azureToken, azureTokenExpiration, err := ctrl.tokenProvider.GetAzureToken(
+		ctx,
+		namespace,
+		akv.Spec.ServiceAccount,
+		k8sToken,
+		akv.Spec.ClientID,
+		akv.Spec.TenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get Azure token: %w", err)
+	}
+
+	// Step 3: List secrets from vault (protected by circuit breaker)
+	var vaultSecrets []azure.VaultSecret
+	err = ctrl.azureCircuitBreaker.Call(func() error {
+		var listErr error
+		vaultSecrets, listErr = ctrl.vaultClient.ListSecrets(ctx, akv.Spec.KeyvaultName, azureToken, azureTokenExpiration)
+		return listErr
+	})
+	if err != nil {
+		if err.Error() == "circuit breaker is open" || strings.Contains(err.Error(), "circuit breaker is open") {
+			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
+				"vault", akv.Spec.KeyvaultName,
+				"namespace", namespace,
+				"name", name)
+			return nil
+		}
+		return fmt.Errorf("failed to list vault secrets: %w", err)
+	}
+
+	slog.Info("Listed vault secrets",
+		"vault", akv.Spec.KeyvaultName,
+		"count", len(vaultSecrets))
+
+	// Step 4: Apply tag filtering if filters are specified
+	filteredSecrets := azure.FilterSecretsByTags(vaultSecrets, akv.Spec.Filters)
+
+	slog.Info("Filtered secrets",
+		"vault", akv.Spec.KeyvaultName,
+		"originalCount", len(vaultSecrets),
+		"filteredCount", len(filteredSecrets),
+		"filters", akv.Spec.Filters)
+
+	// Step 5: Generate SecretProviderClass
+	desiredSPC := generateSecretProviderClass(akv, filteredSecrets)
+
+	// Step 6: Create or update the SecretProviderClass
+	existingSPC := &secretsstorev1.SecretProviderClass{}
+	err = ctrl.ctrlClient.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      name,
+	}, existingSPC)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// SPC doesn't exist, create it
+			slog.Info("Creating SecretProviderClass",
+				"namespace", namespace,
+				"name", name)
+
+			// Use the typed client to create
+			_, createErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Create(
+				ctx,
+				desiredSPC,
+				metav1.CreateOptions{},
+			)
+			if createErr != nil {
+				return fmt.Errorf("failed to create SecretProviderClass: %w", createErr)
+			}
+
+			slog.Info("SecretProviderClass created successfully",
+				"namespace", namespace,
+				"name", name)
+		} else {
+			return fmt.Errorf("failed to get SecretProviderClass: %w", err)
+		}
+	} else {
+		// SPC exists, update it
+		slog.Info("Updating SecretProviderClass",
+			"namespace", namespace,
+			"name", name)
+
+		// Update the spec
+		existingSPC.Spec = desiredSPC.Spec
+		existingSPC.OwnerReferences = desiredSPC.OwnerReferences
+
+		_, updateErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Update(
+			ctx,
+			existingSPC,
+			metav1.UpdateOptions{},
+		)
+		if updateErr != nil {
+			return fmt.Errorf("failed to update SecretProviderClass: %w", updateErr)
+		}
+
+		slog.Info("SecretProviderClass updated successfully",
+			"namespace", namespace,
+			"name", name)
+	}
+
+	// Step 7: Update AzureKeyVaultSync status
+	// Count secret objects (secrets with secret-object: "true" tag)
+	secretObjectCount := 0
+	for _, secret := range filteredSecrets {
+		if secret.Tags != nil {
+			if tagValue, exists := secret.Tags["secret-object"]; exists && tagValue != nil && *tagValue == "true" {
+				secretObjectCount++
+			}
+		}
+	}
+
+	// Update status fields
+	akv.Status.SecretCount = len(filteredSecrets)
+	akv.Status.SecretObjectCount = secretObjectCount
+	akv.Status.GeneratedSPCName = name
+	akv.Status.ObservedGeneration = akv.Generation
+	now := metav1.Now()
+	akv.Status.LastSyncTime = &now
+
+	// Update the status subresource
+	if err := ctrl.ctrlClient.Status().Update(ctx, akv); err != nil {
+		slog.Warn("Failed to update AzureKeyVaultSync status",
+			"namespace", namespace,
+			"name", name,
+			"error", err)
+		// Don't fail the reconciliation on status update failure
+	}
+
+	slog.Info("AzureKeyVaultSync reconciliation complete",
+		"namespace", namespace,
+		"name", name,
+		"secretCount", len(filteredSecrets),
+		"secretObjectCount", secretObjectCount)
+
+	return nil
+}
+
 func (ctrl *Controller) Run(ctx context.Context) {
 	defer ctrl.queue.ShutDown()
 
@@ -721,6 +1017,9 @@ func (ctrl *Controller) Run(ctx context.Context) {
 
 	// Start periodic resync
 	go ctrl.startPeriodicResync(ctx)
+
+	// Start AzureKeyVaultSync CRD watcher
+	go ctrl.watchAzureKeyVaultSync(ctx)
 
 	// Start worker pool
 	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)

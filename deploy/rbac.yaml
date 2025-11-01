@@ -15,9 +15,24 @@ metadata:
   labels:
     app: azure-keyvault-sync-controller
 rules:
+  # AzureKeyVaultSync CRD permissions
+  - apiGroups: ["azure-keyvault-sync.io"]
+    resources: ["azurekeyvaultsyncs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # AzureKeyVaultSync status subresource
+  - apiGroups: ["azure-keyvault-sync.io"]
+    resources: ["azurekeyvaultsyncs/status"]
+    verbs: ["get", "update", "patch"]
+
   # SecretProviderClass permissions
   - apiGroups: ["secrets-store.csi.x-k8s.io"]
     resources: ["secretproviderclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Secret permissions (for annotation mode)
+  - apiGroups: [""]
+    resources: ["secrets"]
     verbs: ["get", "list", "watch", "update", "patch"]
 
   # Token request permissions (for service account impersonation)
