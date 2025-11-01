@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -15,8 +16,10 @@ import (
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/health"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/token"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/update"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
@@ -1033,6 +1036,188 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 	return nil
 }
 
+// watchSecrets watches for Secret creation/updates and applies annotations from SPC metadata
+func (ctrl *Controller) watchSecrets(ctx context.Context) {
+	slog.Info("Starting Secret watcher for annotation synchronization")
+
+	// Use a ticker for periodic reconciliation of Secrets
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Secret watcher shutting down")
+			return
+		case <-ticker.C:
+			// List all Secrets in the watch namespace
+			listOpts := metav1.ListOptions{}
+
+			secrets, err := ctrl.clientset.CoreV1().Secrets(ctrl.watchNamespace).List(ctx, listOpts)
+			if err != nil {
+				slog.Error("Failed to list Secrets", "error", err)
+				continue
+			}
+
+			slog.Debug("Found Secrets to check for annotation sync", "count", len(secrets.Items))
+
+			// Process each Secret
+			for _, secret := range secrets.Items {
+				// Only process Secrets managed by secrets-store.csi.k8s.io
+				if secret.Labels["secrets-store.csi.k8s.io/managed"] != "true" {
+					continue
+				}
+
+				if err := ctrl.reconcileSecretAnnotations(ctx, &secret); err != nil {
+					slog.Error("Failed to reconcile Secret annotations",
+						"namespace", secret.Namespace,
+						"name", secret.Name,
+						"error", err)
+				}
+			}
+		}
+	}
+}
+
+// reconcileSecretAnnotations applies SPC annotations to a Secret
+func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *corev1.Secret) error {
+	namespace := secret.Namespace
+	name := secret.Name
+
+	slog.Debug("Reconciling Secret annotations",
+		"namespace", namespace,
+		"name", name)
+
+	// Find the SPC that manages this Secret
+	spcName, err := ctrl.findSPCForSecret(ctx, secret)
+	if err != nil {
+		return fmt.Errorf("failed to find SPC for Secret: %w", err)
+	}
+	if spcName == "" {
+		slog.Debug("No SPC found for Secret", "namespace", namespace, "name", name)
+		return nil
+	}
+
+	// Get the SPC
+	spc, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Get(
+		ctx,
+		spcName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get SPC: %w", err)
+	}
+
+	// Extract annotations for this Secret from SPC metadata
+	desiredAnnotations := azure.ExtractAnnotationsForSecret(spc.Annotations, name)
+
+	if len(desiredAnnotations) == 0 {
+		slog.Debug("No annotations to apply for Secret", "namespace", namespace, "name", name)
+		return nil
+	}
+
+	// Check if annotations need updating
+	needsUpdate := false
+	for key, desiredValue := range desiredAnnotations {
+		if currentValue, exists := secret.Annotations[key]; !exists || currentValue != desiredValue {
+			needsUpdate = true
+			break
+		}
+	}
+
+	if !needsUpdate {
+		slog.Debug("Secret annotations already up to date", "namespace", namespace, "name", name)
+		return nil
+	}
+
+	// Apply annotations to Secret
+	if err := ctrl.patchSecretAnnotations(ctx, secret, desiredAnnotations); err != nil {
+		return fmt.Errorf("failed to patch Secret annotations: %w", err)
+	}
+
+	slog.Info("Applied annotations to Secret",
+		"namespace", namespace,
+		"name", name,
+		"annotationCount", len(desiredAnnotations))
+
+	return nil
+}
+
+// findSPCForSecret finds the SecretProviderClass that manages a given Secret
+func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Secret) (string, error) {
+	// Check for the secretProviderClass label (added by CSI driver)
+	if spcName, exists := secret.Labels["secrets-store.csi.k8s.io/secretProviderClass"]; exists {
+		return spcName, nil
+	}
+
+	// Fallback: Search for SPC with matching secretObjects
+	spcList, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(secret.Namespace).List(
+		ctx,
+		metav1.ListOptions{},
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to list SPCs: %w", err)
+	}
+
+	for _, spc := range spcList.Items {
+		for _, secretObj := range spc.Spec.SecretObjects {
+			if secretObj.SecretName == secret.Name {
+				return spc.Name, nil
+			}
+		}
+	}
+
+	return "", nil
+}
+
+// patchSecretAnnotations applies annotations to a Secret using JSON Patch
+func (ctrl *Controller) patchSecretAnnotations(ctx context.Context, secret *corev1.Secret, annotations map[string]string) error {
+	// Build JSON Patch operations
+	var patchOps []map[string]interface{}
+
+	// Ensure annotations map exists
+	if secret.Annotations == nil {
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations",
+			"value": map[string]string{},
+		})
+	}
+
+	// Add each annotation
+	for key, value := range annotations {
+		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations/" + escapedKey,
+			"value": value,
+		})
+	}
+
+	// Marshal patch to JSON
+	patchBytes, err := json.Marshal(patchOps)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch: %w", err)
+	}
+
+	// Apply the patch
+	_, err = ctrl.clientset.CoreV1().Secrets(secret.Namespace).Patch(
+		ctx,
+		secret.Name,
+		types.JSONPatchType,
+		patchBytes,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to apply patch: %w", err)
+	}
+
+	return nil
+}
+
 func (ctrl *Controller) Run(ctx context.Context) {
 	defer ctrl.queue.ShutDown()
 
@@ -1044,6 +1229,9 @@ func (ctrl *Controller) Run(ctx context.Context) {
 
 	// Start AzureKeyVaultSync CRD watcher
 	go ctrl.watchAzureKeyVaultSync(ctx)
+
+	// Start Secret watcher for annotation synchronization
+	go ctrl.watchSecrets(ctx)
 
 	// Start worker pool
 	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)
