@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/cache"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/circuitbreaker"
@@ -13,10 +14,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/util/workqueue"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcfake "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned/fake"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// createFakeCtrlClient creates a fake controller-runtime client for testing
+func createFakeCtrlClient() ctrlclient.Client {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = akvv1alpha1.AddToScheme(scheme)
+	_ = secretsstorev1.AddToScheme(scheme)
+	return fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+}
 
 // TestParseKey tests the parseKey helper function
 func TestParseKey(t *testing.T) {
@@ -114,7 +127,7 @@ func TestNewController(t *testing.T) {
 	}
 
 	// Call NewController
-	ctrl := NewController(spcClient, k8sClient, cfg, "test-namespace")
+	ctrl := NewController(spcClient, k8sClient, createFakeCtrlClient(), cfg, "test-namespace")
 
 	// Verify controller is properly initialized
 	assert.NotNil(t, ctrl)
@@ -192,7 +205,7 @@ func TestNewController_CircuitBreakerConfiguration(t *testing.T) {
 				AzureCircuitBreakerTimeout:   tt.timeout,
 			}
 
-			ctrl := NewController(spcClient, k8sClient, cfg, "")
+			ctrl := NewController(spcClient, k8sClient, createFakeCtrlClient(), cfg, "")
 			assert.NotNil(t, ctrl.azureCircuitBreaker)
 
 			// Clean up
@@ -214,7 +227,7 @@ func TestNewController_WithEmptyNamespace(t *testing.T) {
 	}
 
 	// Empty namespace means watch all namespaces
-	ctrl := NewController(spcClient, k8sClient, cfg, "")
+	ctrl := NewController(spcClient, k8sClient, createFakeCtrlClient(), cfg, "")
 	assert.NotNil(t, ctrl)
 	assert.Equal(t, "", ctrl.watchNamespace)
 
@@ -234,8 +247,8 @@ func TestNewController_CachesAreIndependent(t *testing.T) {
 	}
 
 	// Create two controllers
-	ctrl1 := NewController(spcClient, k8sClient, cfg, "ns1")
-	ctrl2 := NewController(spcClient, k8sClient, cfg, "ns2")
+	ctrl1 := NewController(spcClient, k8sClient, createFakeCtrlClient(), cfg, "ns1")
+	ctrl2 := NewController(spcClient, k8sClient, createFakeCtrlClient(), cfg, "ns2")
 
 	// Verify they have independent caches
 	assert.NotSame(t, ctrl1.cache, ctrl2.cache)
