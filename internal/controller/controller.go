@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -73,6 +74,7 @@ func isValidForSync(obj *secretsstorev1.SecretProviderClass) (bool, string) {
 type Controller struct {
 	client              spcclient.Interface
 	clientset           kubernetes.Interface
+	ctrlClient          client.Client // Controller-runtime client for CRD access
 	cache               *cache.SecretProviderClassCache
 	tokenCache          *token.TokenCache
 	azureTokenCache     *azure.AzureTokenCache
@@ -88,7 +90,7 @@ type Controller struct {
 	patchClient   PatchClient
 }
 
-func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *config.Config, watchNamespace string) *Controller {
+func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface, ctrlClient client.Client, config *config.Config, watchNamespace string) *Controller {
 	// Initialize circuit breaker for Azure API protection
 	azureCB := circuitbreaker.NewCircuitBreaker(
 		config.AzureCircuitBreakerThreshold,
@@ -106,11 +108,12 @@ func NewController(client spcclient.Interface, clientset kubernetes.Interface, c
 	// Create real implementations of interfaces
 	tokenProvider := NewRealTokenProvider(tokenCache, azureTokenCache)
 	vaultClient := NewRealVaultClient()
-	patchClient := NewRealPatchClient(client)
+	patchClient := NewRealPatchClient(spcClient)
 
 	return &Controller{
-		client:              client,
+		client:              spcClient,
 		clientset:           clientset,
+		ctrlClient:          ctrlClient,
 		cache:               cache.NewCache(),
 		tokenCache:          tokenCache,
 		azureTokenCache:     azureTokenCache,
