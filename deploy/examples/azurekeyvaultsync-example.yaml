@@ -1,0 +1,44 @@
+---
+# Example AzureKeyVaultSync resource
+# This shows how to use the CRD mode to declaratively sync Azure Key Vault secrets
+apiVersion: azure-keyvault-sync.io/v1alpha1
+kind: AzureKeyVaultSync
+metadata:
+  name: my-vault-sync
+  namespace: default
+spec:
+  # Name of your Azure Key Vault
+  keyvaultName: my-keyvault
+
+  # Azure tenant ID (UUID format)
+  tenantId: "00000000-0000-0000-0000-000000000000"
+
+  # Azure client ID for workload identity (UUID format)
+  clientID: "00000000-0000-0000-0000-000000000000"
+
+  # Kubernetes ServiceAccount with azure.workload.identity/client-id annotation
+  serviceAccount: workload-identity-sa
+
+  # Optional: Filter secrets by tags (AND logic - all tags must match)
+  # If omitted, all secrets from the vault are synced
+  filters:
+    service: "my-app"
+    environment: "production"
+
+  # Optional: What happens to the SPC when this resource is deleted
+  # Cascade (default): SecretProviderClass is deleted
+  # Orphan: SecretProviderClass remains
+  deletePolicy: Cascade
+
+---
+# Example with minimal configuration (no filtering)
+apiVersion: azure-keyvault-sync.io/v1alpha1
+kind: AzureKeyVaultSync
+metadata:
+  name: simple-vault-sync
+  namespace: default
+spec:
+  keyvaultName: my-keyvault
+  tenantId: "00000000-0000-0000-0000-000000000000"
+  clientID: "00000000-0000-0000-0000-000000000000"
+  serviceAccount: workload-identity-sa
