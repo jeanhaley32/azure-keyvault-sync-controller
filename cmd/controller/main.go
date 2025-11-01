@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/util/homedir"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 	ctrl "sigs.k8s.io/controller-runtime"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
@@ -98,11 +99,15 @@ func main() {
 	// Create controller-runtime manager (provides client and cache)
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: cfg.MetricsBindAddress,
+		},
 	})
 	if err != nil {
 		slog.Error("Error creating controller-runtime manager", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("Controller-runtime metrics server configured", "address", cfg.MetricsBindAddress)
 
 	// Read watch namespace from environment (empty = cluster-wide for backward compatibility)
 	watchNamespace := os.Getenv("WATCH_NAMESPACE")

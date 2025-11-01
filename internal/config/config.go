@@ -22,7 +22,8 @@ type Config struct {
 	AzureTokenRenewalThreshold float64
 
 	// Server configuration
-	HealthCheckPort int
+	HealthCheckPort     int
+	MetricsBindAddress  string
 
 	// Kubernetes API rate limiting
 	KubernetesQPS   float32
@@ -52,7 +53,8 @@ func LoadConfig() (*Config, error) {
 		AzureTokenRenewalThreshold: parseFloatEnv("AZURE_TOKEN_RENEWAL_THRESHOLD", 0.8),
 
 		// Server defaults
-		HealthCheckPort: parseIntEnv("HEALTH_CHECK_PORT", 8080),
+		HealthCheckPort:    parseIntEnv("HEALTH_CHECK_PORT", 8080),
+		MetricsBindAddress: getEnv("METRICS_BIND_ADDRESS", ":9090"),
 
 		// Kubernetes API rate limiting defaults
 		KubernetesQPS:   parseFloat32Env("KUBERNETES_QPS", 10.0),
@@ -130,6 +132,11 @@ func (c *Config) Validate() error {
 	// Validate health check port
 	if c.HealthCheckPort < 1 || c.HealthCheckPort > 65535 {
 		return fmt.Errorf("HEALTH_CHECK_PORT must be between 1-65535, got: %d", c.HealthCheckPort)
+	}
+
+	// Validate metrics bind address
+	if c.MetricsBindAddress == "" {
+		return fmt.Errorf("METRICS_BIND_ADDRESS cannot be empty")
 	}
 
 	// Validate Kubernetes API rate limits
