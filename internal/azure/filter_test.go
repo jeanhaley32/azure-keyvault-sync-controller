@@ -17,39 +17,11 @@ func TestMatchesTags(t *testing.T) {
 		expectInclude bool
 		expectReason  RejectionReason
 	}{
-		// Path 1: respect-tags disabled → Include all
-		{
-			name:      "RespectTagsDisabled_NoTags",
-			vaultTags: nil,
-			config: TagFilterConfig{
-				RespectTags:      false,
-				ServiceLabel:     "web-api",
-				EnvironmentLabel: "production",
-			},
-			expectInclude: true,
-			expectReason:  ReasonIncluded,
-		},
-		{
-			name: "RespectTagsDisabled_WithTags",
-			vaultTags: map[string]*string{
-				"service":     ptr("mobile-api"),
-				"environment": ptr("staging"),
-			},
-			config: TagFilterConfig{
-				RespectTags:      false,
-				ServiceLabel:     "web-api",
-				EnvironmentLabel: "production",
-			},
-			expectInclude: true,
-			expectReason:  ReasonIncluded,
-		},
-
-		// Path 2: No service tag in vault → Reject
+		// Path 1: Single-tenant mode (no service/environment labels) → Include all
 		{
 			name:      "NoServiceTag_NilTags",
 			vaultTags: nil,
 			config: TagFilterConfig{
-				RespectTags:      true,
 				ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
@@ -60,8 +32,7 @@ func TestMatchesTags(t *testing.T) {
 			name:      "NoServiceTag_EmptyMap",
 			vaultTags: map[string]*string{},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: false,
@@ -73,8 +44,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("production"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: false,
@@ -86,8 +56,7 @@ func TestMatchesTags(t *testing.T) {
 				"service": ptr(""),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: false,
@@ -101,8 +70,7 @@ func TestMatchesTags(t *testing.T) {
 				"service": ptr("mobile-api"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "",
 			},
 			expectInclude: false,
@@ -115,8 +83,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("production"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: false,
@@ -130,8 +97,7 @@ func TestMatchesTags(t *testing.T) {
 				"service": ptr("web-api"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "",
 			},
 			expectInclude: true,
@@ -143,8 +109,7 @@ func TestMatchesTags(t *testing.T) {
 				"service": ptr("web-api"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: true,
@@ -157,8 +122,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr(""),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: true,
@@ -173,8 +137,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("production"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "",
 			},
 			expectInclude: false,
@@ -189,8 +152,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("production"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "staging",
 			},
 			expectInclude: false,
@@ -205,8 +167,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("production"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: true,
@@ -220,8 +181,7 @@ func TestMatchesTags(t *testing.T) {
 				"service": ptr("Web-API"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "",
 			},
 			expectInclude: true,
@@ -234,8 +194,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("PRODUCTION"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: true,
@@ -248,8 +207,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr("Production"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "Web-Api",
+					ServiceLabel:     "Web-Api",
 				EnvironmentLabel: "PRODUCTION",
 			},
 			expectInclude: true,
@@ -263,8 +221,7 @@ func TestMatchesTags(t *testing.T) {
 				"service": ptr("  web-api  "),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "",
 			},
 			expectInclude: true,
@@ -277,8 +234,7 @@ func TestMatchesTags(t *testing.T) {
 				"environment": ptr(" production "),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: true,
@@ -296,8 +252,7 @@ func TestMatchesTags(t *testing.T) {
 				"cost-center": ptr("engineering"),
 			},
 			config: TagFilterConfig{
-				RespectTags:      true,
-				ServiceLabel:     "web-api",
+					ServiceLabel:     "web-api",
 				EnvironmentLabel: "production",
 			},
 			expectInclude: true,

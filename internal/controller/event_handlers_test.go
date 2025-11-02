@@ -87,7 +87,6 @@ func TestHandleAdded(t *testing.T) {
 			name: "SPC with tag filtering enabled",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithRespectTags(true).
 				WithLabel("service", "app1").
 				Build(),
 			expectEnqueued: true,

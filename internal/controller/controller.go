@@ -343,7 +343,6 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 
 	// Create filter config for service/environment matching
 	filterConfig := azure.TagFilterConfig{
-		RespectTags:      true, // Always respect tags
 		ServiceLabel:     serviceLabel,
 		EnvironmentLabel: environmentLabel,
 	}

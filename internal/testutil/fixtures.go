@@ -44,16 +44,6 @@ func (b *SecretProviderClassBuilder) WithServiceAccount(sa string) *SecretProvid
 	return b
 }
 
-// WithRespectTags adds the respect-tags annotation
-func (b *SecretProviderClassBuilder) WithRespectTags(enabled bool) *SecretProviderClassBuilder {
-	if enabled {
-		b.spc.Annotations["azure-keyvault-sync/respect-tags"] = "true"
-	} else {
-		b.spc.Annotations["azure-keyvault-sync/respect-tags"] = "false"
-	}
-	return b
-}
-
 // WithLabel adds a label to the SecretProviderClass
 func (b *SecretProviderClassBuilder) WithLabel(key, value string) *SecretProviderClassBuilder {
 	b.spc.Labels[key] = value
@@ -233,11 +223,10 @@ func MinimalValidSPC() *secretsstorev1.SecretProviderClass {
 		Build()
 }
 
-// SPCWithTagFiltering returns a SecretProviderClass with tag filtering enabled
+// SPCWithTagFiltering returns a SecretProviderClass with service/environment labels for multi-tenant filtering
 func SPCWithTagFiltering(service, environment string) *secretsstorev1.SecretProviderClass {
 	builder := NewSecretProviderClass("default", "test-spc").
-		WithServiceAccount("test-sa").
-		WithRespectTags(true)
+		WithServiceAccount("test-sa")
 
 	if service != "" {
 		builder.WithLabel("service", service)
