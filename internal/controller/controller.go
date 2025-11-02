@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -1268,58 +1269,126 @@ func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *
 	desiredAnnotations := azure.ExtractAnnotationsForSecret(spc.Annotations, name)
 	desiredLabels := azure.ExtractLabelsForSecret(spc.Annotations, name)
 
-	if len(desiredAnnotations) == 0 && len(desiredLabels) == 0 {
-		slog.Debug("No annotations or labels to apply for Secret", "namespace", namespace, "name", name)
-		return nil
-	}
-
-	// Check if annotations need updating
-	annotationsNeedUpdate := false
-	if len(desiredAnnotations) > 0 {
-		if secret.Annotations == nil {
-			annotationsNeedUpdate = true
-		} else {
-			for key, desiredValue := range desiredAnnotations {
-				if currentValue, exists := secret.Annotations[key]; !exists || currentValue != desiredValue {
-					annotationsNeedUpdate = true
-					break
-				}
-			}
+	// Find annotations/labels to add or update
+	annotationsToAdd := make(map[string]string)
+	for key, desiredValue := range desiredAnnotations {
+		currentValue, exists := secret.Annotations[key]
+		if !exists || currentValue != desiredValue {
+			annotationsToAdd[key] = desiredValue
 		}
 	}
 
-	// Check if labels need updating
-	labelsNeedUpdate := false
-	if len(desiredLabels) > 0 {
-		if secret.Labels == nil {
-			labelsNeedUpdate = true
-		} else {
-			for key, desiredValue := range desiredLabels {
-				if currentValue, exists := secret.Labels[key]; !exists || currentValue != desiredValue {
-					labelsNeedUpdate = true
-					break
-				}
-			}
+	labelsToAdd := make(map[string]string)
+	for key, desiredValue := range desiredLabels {
+		currentValue, exists := secret.Labels[key]
+		if !exists || currentValue != desiredValue {
+			labelsToAdd[key] = desiredValue
 		}
 	}
 
-	if !annotationsNeedUpdate && !labelsNeedUpdate {
+	// Get previously managed metadata from tracking annotations
+	previouslyManagedAnnotations := getPreviouslyManagedMetadata(secret.Annotations, azure.ManagedAnnotationsAnnotation)
+	previouslyManagedLabels := getPreviouslyManagedMetadata(secret.Annotations, azure.ManagedLabelsAnnotation)
+
+	// Find annotations to remove (were previously managed but no longer desired)
+	annotationsToRemove := []string{}
+	for _, key := range previouslyManagedAnnotations {
+		if _, stillDesired := desiredAnnotations[key]; !stillDesired {
+			annotationsToRemove = append(annotationsToRemove, key)
+		}
+	}
+
+	// Find labels to remove (were previously managed but no longer desired)
+	labelsToRemove := []string{}
+	for _, key := range previouslyManagedLabels {
+		if _, stillDesired := desiredLabels[key]; !stillDesired {
+			labelsToRemove = append(labelsToRemove, key)
+		}
+	}
+
+	// Build new tracking annotation values
+	newManagedAnnotations := buildManagedMetadataList(desiredAnnotations)
+	newManagedLabels := buildManagedMetadataList(desiredLabels)
+
+	// Add tracking annotations to the annotations we're adding
+	if newManagedAnnotations != "" {
+		annotationsToAdd[azure.ManagedAnnotationsAnnotation] = newManagedAnnotations
+	}
+	if newManagedLabels != "" {
+		annotationsToAdd[azure.ManagedLabelsAnnotation] = newManagedLabels
+	}
+
+	// Check if we need to remove tracking annotations (when no metadata is managed)
+	if newManagedAnnotations == "" && secret.Annotations != nil {
+		if _, exists := secret.Annotations[azure.ManagedAnnotationsAnnotation]; exists {
+			annotationsToRemove = append(annotationsToRemove, azure.ManagedAnnotationsAnnotation)
+		}
+	}
+	if newManagedLabels == "" && secret.Annotations != nil {
+		if _, exists := secret.Annotations[azure.ManagedLabelsAnnotation]; exists {
+			annotationsToRemove = append(annotationsToRemove, azure.ManagedLabelsAnnotation)
+		}
+	}
+
+	if len(annotationsToAdd) == 0 && len(labelsToAdd) == 0 && len(annotationsToRemove) == 0 && len(labelsToRemove) == 0 {
 		slog.Debug("Secret metadata already up to date", "namespace", namespace, "name", name)
 		return nil
 	}
 
-	// Apply annotations and labels to Secret
-	if err := ctrl.patchSecretMetadata(ctx, secret, desiredAnnotations, desiredLabels); err != nil {
+	// Apply metadata changes to Secret
+	if err := ctrl.patchSecretMetadata(ctx, secret, annotationsToAdd, labelsToAdd, annotationsToRemove, labelsToRemove); err != nil {
 		return fmt.Errorf("failed to patch Secret metadata: %w", err)
 	}
 
 	slog.Info("Applied metadata to Secret",
 		"namespace", namespace,
 		"name", name,
-		"annotationCount", len(desiredAnnotations),
-		"labelCount", len(desiredLabels))
+		"annotationsAdded", len(annotationsToAdd),
+		"labelsAdded", len(labelsToAdd),
+		"annotationsRemoved", len(annotationsToRemove),
+		"labelsRemoved", len(labelsToRemove))
 
 	return nil
+}
+
+// getPreviouslyManagedMetadata extracts the list of previously managed metadata keys from a tracking annotation
+func getPreviouslyManagedMetadata(annotations map[string]string, trackingKey string) []string {
+	if annotations == nil {
+		return []string{}
+	}
+
+	value, exists := annotations[trackingKey]
+	if !exists || value == "" {
+		return []string{}
+	}
+
+	// Split comma-separated list
+	keys := strings.Split(value, ",")
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// buildManagedMetadataList creates a comma-separated list of metadata keys for tracking
+func buildManagedMetadataList(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+
+	// Sort for consistency
+	sort.Strings(keys)
+
+	return strings.Join(keys, ",")
 }
 
 // findSPCForSecret finds the SecretProviderClass that manages a given Secret
@@ -1351,13 +1420,37 @@ func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Sec
 	return "", nil
 }
 
-// patchSecretAnnotations applies annotations to a Secret using JSON Patch
-func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.Secret, annotations map[string]string, labels map[string]string) error {
+// patchSecretMetadata applies annotations and labels to a Secret using JSON Patch
+func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.Secret, annotationsToAdd map[string]string, labelsToAdd map[string]string, annotationsToRemove []string, labelsToRemove []string) error {
 	// Build JSON Patch operations
 	var patchOps []map[string]interface{}
 
+	// Remove annotations first (must be done before adds if removing all)
+	for _, key := range annotationsToRemove {
+		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":   "remove",
+			"path": "/metadata/annotations/" + escapedKey,
+		})
+	}
+
+	// Remove labels first (must be done before adds if removing all)
+	for _, key := range labelsToRemove {
+		// Escape forward slashes in label keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":   "remove",
+			"path": "/metadata/labels/" + escapedKey,
+		})
+	}
+
 	// Ensure annotations map exists if we have annotations to add
-	if len(annotations) > 0 && secret.Annotations == nil {
+	if len(annotationsToAdd) > 0 && secret.Annotations == nil {
 		patchOps = append(patchOps, map[string]interface{}{
 			"op":    "add",
 			"path":  "/metadata/annotations",
@@ -1366,7 +1459,7 @@ func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.
 	}
 
 	// Add each annotation
-	for key, value := range annotations {
+	for key, value := range annotationsToAdd {
 		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
 		escapedKey := strings.ReplaceAll(key, "~", "~0")
 		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
@@ -1379,7 +1472,7 @@ func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.
 	}
 
 	// Ensure labels map exists if we have labels to add
-	if len(labels) > 0 && secret.Labels == nil {
+	if len(labelsToAdd) > 0 && secret.Labels == nil {
 		patchOps = append(patchOps, map[string]interface{}{
 			"op":    "add",
 			"path":  "/metadata/labels",
@@ -1388,7 +1481,7 @@ func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.
 	}
 
 	// Add each label
-	for key, value := range labels {
+	for key, value := range labelsToAdd {
 		// Escape forward slashes in label keys (JSON Pointer RFC 6901)
 		escapedKey := strings.ReplaceAll(key, "~", "~0")
 		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")

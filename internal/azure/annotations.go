@@ -18,6 +18,14 @@ const (
 
 	// SPCLabelPrefix is the prefix used in SecretProviderClass metadata for per-secret labels
 	SPCLabelPrefix = "secret-label.azure-keyvault-sync.io/"
+
+	// ManagedLabelsAnnotation is the annotation key used to track which labels are managed by this controller
+	// Value is a comma-separated list of label keys
+	ManagedLabelsAnnotation = "azure-keyvault-sync.io/managed-labels"
+
+	// ManagedAnnotationsAnnotation is the annotation key used to track which annotations are managed by this controller
+	// Value is a comma-separated list of annotation keys
+	ManagedAnnotationsAnnotation = "azure-keyvault-sync.io/managed-annotations"
 )
 
 // TransformTagsToSPCAnnotations converts Azure Key Vault secret tags to SecretProviderClass annotations.

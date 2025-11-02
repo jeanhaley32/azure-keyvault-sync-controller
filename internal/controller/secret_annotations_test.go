@@ -363,8 +363,8 @@ func TestPatchSecretAnnotations(t *testing.T) {
 				azureCircuitBreaker: circuitbreaker.NewCircuitBreaker(cfg.AzureCircuitBreakerThreshold, cfg.AzureCircuitBreakerTimeout),
 			}
 
-			// Call patchSecretAnnotations
-			err := ctrl.patchSecretMetadata(ctx, tt.secret, tt.annotationsToPatch, nil)
+			// Call patchSecretMetadata with no removals
+			err := ctrl.patchSecretMetadata(ctx, tt.secret, tt.annotationsToPatch, nil, nil, nil)
 
 			// Assert error expectation
 			if tt.expectError {
