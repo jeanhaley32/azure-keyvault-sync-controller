@@ -29,6 +29,7 @@ type AzureTokenCache struct {
 type CachedAzureToken struct {
 	Token          string
 	ExpirationTime time.Time
+	IssuedAt       time.Time
 	Namespace      string
 	ServiceAccount string
 	ClientID       string
@@ -77,6 +78,7 @@ func (ac *AzureTokenCache) GetToken(
 	ac.tokens[key] = &CachedAzureToken{
 		Token:          token,
 		ExpirationTime: expiration,
+		IssuedAt:       time.Now(),
 		Namespace:      namespace,
 		ServiceAccount: serviceAccount,
 		ClientID:       clientID,
@@ -104,10 +106,22 @@ func (ac *AzureTokenCache) IsTokenValid(namespace, serviceAccount string) bool {
 
 	// Check if token needs renewal (at 80% of lifetime)
 	now := time.Now()
-	// Calculate when we should renew (20% before expiration)
-	renewalTime := cached.ExpirationTime.Add(-time.Duration(float64(time.Until(cached.ExpirationTime)) * (1 - azureTokenRenewalThreshold)))
 
-	return now.Before(renewalTime)
+	// Token already expired
+	if now.After(cached.ExpirationTime) {
+		return false
+	}
+
+	// Calculate original lifetime and remaining lifetime
+	originalLifetime := cached.ExpirationTime.Sub(cached.IssuedAt)
+	remainingLifetime := cached.ExpirationTime.Sub(now)
+
+	// Calculate renewal threshold based on original token lifetime
+	// For example, threshold of 0.8 means renew when ≤ 20% of original lifetime remains
+	renewalThresholdDuration := time.Duration(float64(originalLifetime) * (1 - azureTokenRenewalThreshold))
+
+	// Token is valid if remaining lifetime is more than the renewal threshold
+	return remainingLifetime > renewalThresholdDuration
 }
 
 // exchangeToken exchanges a Kubernetes JWT for an Azure AD access token

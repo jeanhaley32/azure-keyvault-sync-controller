@@ -45,18 +45,9 @@ func TestIsValidForSync(t *testing.T) {
 			expectServiceAcct: "",
 		},
 		{
-			name: "only respect-tags annotation (no service-account)",
-			annotations: map[string]string{
-				annotationRespectTags: "true",
-			},
-			expectValid:       false,
-			expectServiceAcct: "",
-		},
-		{
 			name: "service-account with other annotations",
 			annotations: map[string]string{
 				annotationServiceAccount: "web-api",
-				annotationRespectTags:    "true",
 				"azure-keyvault-sync/last-sync": "2025-10-29T12:34:56Z",
 			},
 			expectValid:       true,
@@ -125,15 +116,6 @@ func TestGetServiceAccount(t *testing.T) {
 			expectSA:     "",
 			expectExists: true,
 		},
-		{
-			name: "other annotations present but not service-account",
-			annotations: map[string]string{
-				annotationRespectTags: "true",
-				"some-other-annotation": "value",
-			},
-			expectSA:     "",
-			expectExists: false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -173,14 +155,6 @@ func TestAnnotationOptIn(t *testing.T) {
 			name:        "no opt-in without service-account",
 			annotations: map[string]string{},
 			description: "No service-account annotation means no sync",
-			shouldSync:  false,
-		},
-		{
-			name: "respect-tags alone is not enough",
-			annotations: map[string]string{
-				annotationRespectTags: "true",
-			},
-			description: "respect-tags without service-account should not enable sync",
 			shouldSync:  false,
 		},
 		{

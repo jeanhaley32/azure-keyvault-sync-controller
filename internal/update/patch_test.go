@@ -56,6 +56,7 @@ func TestPatchSecretProviderClass(t *testing.T) {
 			"test-spc",
 			newObjectsYAML,
 			nil, // no secretObjects change
+			nil, // no annotations
 			timestamp,
 		)
 
@@ -130,6 +131,7 @@ func TestPatchSecretProviderClass(t *testing.T) {
 			"test-spc",
 			"array:\n  - objectName: secret1",
 			secretObjects,
+			nil, // no annotations
 			time.Now().Format(time.RFC3339),
 		)
 
@@ -191,6 +193,7 @@ func TestPatchSecretProviderClass(t *testing.T) {
 			"test-spc",
 			"array:\n  - objectName: secret1",
 			"REMOVE_FIELD", // Special marker to remove field
+			nil, // no annotations
 			time.Now().Format(time.RFC3339),
 		)
 
@@ -220,6 +223,7 @@ func TestPatchSecretProviderClass(t *testing.T) {
 			"does-not-exist",
 			"array:\n  - objectName: secret1",
 			nil,
+			nil, // no annotations
 			time.Now().Format(time.RFC3339),
 		)
 
@@ -297,6 +301,7 @@ func TestPatchSecretProviderClass(t *testing.T) {
 			"test-spc",
 			"array:\n  - objectName: db-password\n  - objectName: api-key",
 			secretObjects,
+			nil, // no annotations
 			time.Now().Format(time.RFC3339),
 		)
 

@@ -42,8 +42,8 @@ func (m *MockVaultClient) ListSecrets(ctx context.Context, vaultName, token stri
 		return m.ListSecretsFunc(ctx, vaultName, token, expiration)
 	}
 	return []azure.VaultSecret{
-		{Name: "mock-secret-1", Tags: map[string]*string{}},
-		{Name: "mock-secret-2", Tags: map[string]*string{}},
+		{Name: "mock-secret-1", Tags: map[string]*string{"sync": ptr("true")}},
+		{Name: "mock-secret-2", Tags: map[string]*string{"sync": ptr("true")}},
 	}, nil
 }
 
@@ -53,19 +53,19 @@ func (m *MockVaultClient) ListCertificates(ctx context.Context, vaultName, token
 		return m.ListCertificatesFunc(ctx, vaultName, token, expiration)
 	}
 	return []azure.VaultCertificate{
-		{Name: "mock-cert-1", Tags: map[string]*string{}},
+		{Name: "mock-cert-1", Tags: map[string]*string{"sync": ptr("true")}},
 	}, nil
 }
 
 // MockPatchClient is a mock implementation of PatchClient for testing
 type MockPatchClient struct {
-	PatchSecretProviderClassFunc func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error
+	PatchSecretProviderClassFunc func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error
 }
 
 // PatchSecretProviderClass calls the mock function
-func (m *MockPatchClient) PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+func (m *MockPatchClient) PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 	if m.PatchSecretProviderClassFunc != nil {
-		return m.PatchSecretProviderClassFunc(ctx, namespace, name, objectsYAML, secretObjects, timestamp)
+		return m.PatchSecretProviderClassFunc(ctx, namespace, name, objectsYAML, secretObjects, annotations, timestamp)
 	}
 	return nil
 }

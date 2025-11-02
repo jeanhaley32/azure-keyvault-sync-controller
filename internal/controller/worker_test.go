@@ -47,7 +47,7 @@ func TestProcessNextItem(t *testing.T) {
 
 		// Mock patch client
 		ctrl.patchClient = &MockPatchClient{
-			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 				return nil
 			},
 		}
@@ -150,7 +150,7 @@ func TestReconcile(t *testing.T) {
 
 		// Mock patch client
 		ctrl.patchClient = &MockPatchClient{
-			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 				return nil
 			},
 		}
@@ -332,7 +332,7 @@ func TestWorker(t *testing.T) {
 			},
 		}
 		ctrl.patchClient = &MockPatchClient{
-			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 				return nil
 			},
 		}

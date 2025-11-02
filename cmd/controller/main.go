@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
+	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -44,7 +45,7 @@ func main() {
 		"logLevel", cfg.LogLevel)
 
 	// Try in-cluster config first (for running in Kubernetes)
-	config, err := clientcmd.BuildConfigFromFlags("", "")
+	restConfig, err := clientcmd.BuildConfigFromFlags("", "")
 	if err != nil {
 		// Fall back to kubeconfig file for local development
 		slog.Info("In-cluster config not available, trying kubeconfig file")
@@ -56,7 +57,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		restConfig, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
 			slog.Error("Error building kubeconfig", "error", err)
 			os.Exit(1)
@@ -67,19 +68,19 @@ func main() {
 	}
 
 	// Apply Kubernetes API rate limits
-	config.QPS = cfg.KubernetesQPS
-	config.Burst = cfg.KubernetesBurst
+	restConfig.QPS = cfg.KubernetesQPS
+	restConfig.Burst = cfg.KubernetesBurst
 	slog.Info("Kubernetes API rate limits configured",
 		"qps", cfg.KubernetesQPS,
 		"burst", cfg.KubernetesBurst)
 
-	spcClientset, err := spcclient.NewForConfig(config)
+	spcClientset, err := spcclient.NewForConfig(restConfig)
 	if err != nil {
 		slog.Error("Error creating secrets store CSI client", "error", err)
 		os.Exit(1)
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		slog.Error("Error creating kubernetes clientset", "error", err)
 		os.Exit(1)
@@ -95,9 +96,15 @@ func main() {
 		slog.Error("Error adding AzureKeyVaultSync scheme", "error", err)
 		os.Exit(1)
 	}
+	// Add SecretProviderClass scheme for CRD reconciliation
+	if err := secretsstorev1.AddToScheme(scheme); err != nil {
+		slog.Error("Error adding SecretProviderClass scheme", "error", err)
+		os.Exit(1)
+	}
 
 	// Create controller-runtime manager (provides client and cache)
-	mgr, err := ctrl.NewManager(config, ctrl.Options{
+	// Disable manager metrics by setting bind address to "0" (we have our own metrics server)
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: cfg.MetricsBindAddress,
@@ -117,17 +124,27 @@ func main() {
 		slog.Info("Cluster-wide mode enabled (watching all namespaces)")
 	}
 
-	controller := controller.NewController(spcClientset, clientset, mgr.GetClient(), cfg, watchNamespace)
+	ctrl := controller.NewController(spcClientset, clientset, mgr.GetClient(), cfg, watchNamespace)
+
+	// Register AzureKeyVaultSync CRD reconciler with manager
+	akvReconciler := &controller.AzureKeyVaultSyncReconciler{
+		Client:     mgr.GetClient(),
+		Controller: ctrl,
+	}
+	if err := akvReconciler.SetupWithManager(mgr); err != nil {
+		slog.Error("Failed to setup AzureKeyVaultSync reconciler", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("AzureKeyVaultSync reconciler registered successfully")
 
 	// Start health check server
 	healthAddr := fmt.Sprintf(":%d", cfg.HealthCheckPort)
 	slog.Info("Starting health check server", "address", healthAddr)
-	go func() {
-		if err := health.StartHealthCheckServer(healthAddr, controller.HealthChecker); err != nil {
-			slog.Error("Health check server failed", "error", err)
-			os.Exit(1)
-		}
-	}()
+	healthServer, err := health.StartHealthCheckServer(healthAddr, ctrl.HealthChecker)
+	if err != nil {
+		slog.Error("Health check server failed to start", "error", err)
+		os.Exit(1)
+	}
 
 	// Setup signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,7 +166,7 @@ func main() {
 	controllerDone := make(chan struct{})
 	go func() {
 		defer close(controllerDone)
-		controller.Run(ctx)
+		ctrl.Run(ctx)
 	}()
 
 	// Wait for shutdown signal
@@ -167,7 +184,31 @@ func main() {
 	case <-controllerDone:
 		slog.Info("Controller shutdown complete")
 	case <-time.After(shutdownTimeout):
-		slog.Warn("Shutdown timeout exceeded, forcing exit")
+		slog.Warn("Controller shutdown timeout exceeded, forcing exit")
+		return
+	}
+
+	// Wait for manager to finish with shorter timeout
+	managerTimeout := 5 * time.Second
+	slog.Info("Waiting for manager shutdown", "timeout", managerTimeout)
+
+	select {
+	case <-managerDone:
+		slog.Info("Manager shutdown complete")
+	case <-time.After(managerTimeout):
+		slog.Warn("Manager shutdown timeout exceeded, forcing exit")
+	}
+
+	// Shutdown health check server gracefully
+	healthShutdownTimeout := 5 * time.Second
+	slog.Info("Shutting down health check server", "timeout", healthShutdownTimeout)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), healthShutdownTimeout)
+	defer shutdownCancel()
+
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("Health server shutdown error", "error", err)
+	} else {
+		slog.Info("Health server shutdown complete")
 	}
 
 	slog.Info("Shutdown complete")

@@ -117,12 +117,13 @@ func TestIsTokenValid(t *testing.T) {
 		{
 			name: "token at renewal threshold - 80% of lifetime",
 			setupCache: func(tc *TokenCache) {
-				// Token expiring in 12 minutes (720 seconds)
-				// Renewal threshold is at 80% of 3600 seconds = 2880 seconds before expiration
-				// Token is valid if current time < (expiration - 720 seconds)
+				// K8s tokens have 1-hour (3600s) lifetime
+				// With 0.8 threshold, renewal threshold = 3600 * (1-0.8) = 720s
+				// Token should be renewed when remaining ≤ 720s
+				// Setting to 10 minutes (600s) which is < 720s, so should trigger renewal
 				tc.tokens["default/test-sa"] = &CachedToken{
 					Token:          "near-expiry-token",
-					ExpirationTime: time.Now().Add(12 * time.Minute),
+					ExpirationTime: time.Now().Add(10 * time.Minute),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 				}

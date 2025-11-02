@@ -87,10 +87,21 @@ func (tc *TokenCache) IsTokenValid(namespace, serviceAccount string) bool {
 
 	// Calculate renewal time (80% of token lifetime)
 	now := time.Now()
-	renewalTime := cached.ExpirationTime.Add(-time.Duration(float64(tokenExpirationSeconds) * (1 - tokenRenewalThreshold)) * time.Second)
 
-	// Token is valid if we haven't reached renewal threshold
-	return now.Before(renewalTime)
+	// Token already expired
+	if now.After(cached.ExpirationTime) {
+		return false
+	}
+
+	// Calculate remaining lifetime
+	remainingLifetime := cached.ExpirationTime.Sub(now)
+
+	// Calculate renewal threshold based on original token lifetime
+	// For 1-hour tokens (3600s), threshold of 0.8 means renew when ≤ 720s (20%) remains
+	renewalThresholdDuration := time.Duration(float64(tokenExpirationSeconds) * (1 - tokenRenewalThreshold)) * time.Second
+
+	// Token is valid if remaining lifetime is more than the renewal threshold
+	return remainingLifetime > renewalThresholdDuration
 }
 
 // GetToken retrieves a cached token or requests a new one

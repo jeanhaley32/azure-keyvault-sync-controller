@@ -44,6 +44,7 @@ func TestIsTokenValid(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "valid-azure-token",
 					ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "test-client-id",
@@ -61,6 +62,7 @@ func TestIsTokenValid(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "expired-token",
 					ExpirationTime: time.Now().Add(-1 * time.Hour),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "test-client-id",
@@ -81,6 +83,7 @@ func TestIsTokenValid(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "near-expiry-token",
 					ExpirationTime: time.Now().Add(30 * time.Second),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "test-client-id",
@@ -98,6 +101,7 @@ func TestIsTokenValid(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "fresh-token",
 					ExpirationTime: time.Now().Add(50 * time.Minute),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "test-client-id",
@@ -115,6 +119,7 @@ func TestIsTokenValid(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "token",
 					ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "test-client-id",
@@ -132,6 +137,7 @@ func TestIsTokenValid(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "token",
 					ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "test-client-id",
@@ -167,6 +173,7 @@ func TestGetTokenCached(t *testing.T) {
 	ac.tokens[key] = &CachedAzureToken{
 		Token:          expectedToken,
 		ExpirationTime: expectedExpiration,
+		IssuedAt:       time.Now(),
 		Namespace:      "default",
 		ServiceAccount: "test-sa",
 		ClientID:       "test-client-id",
@@ -220,6 +227,7 @@ func TestAzureTokenCacheThreadSafety(t *testing.T) {
 				ac.tokens[key] = &CachedAzureToken{
 					Token:          "token",
 					ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 					Namespace:      "default",
 					ServiceAccount: "test-sa",
 					ClientID:       "client-id",
@@ -386,6 +394,7 @@ func TestCachedAzureTokenStructure(t *testing.T) {
 	token := &CachedAzureToken{
 		Token:          "test-token",
 		ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 		Namespace:      "default",
 		ServiceAccount: "test-sa",
 		ClientID:       "client-123",
@@ -443,6 +452,7 @@ func TestAzureTokenCacheKeyFormat(t *testing.T) {
 			ac.tokens[key] = &CachedAzureToken{
 				Token:          "test",
 				ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 				Namespace:      tt.namespace,
 				ServiceAccount: tt.serviceAccount,
 			}
@@ -478,6 +488,7 @@ func TestGetTokenMultipleServiceAccounts(t *testing.T) {
 		ac.tokens[key] = &CachedAzureToken{
 			Token:          sa.token,
 			ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
 			Namespace:      sa.namespace,
 			ServiceAccount: sa.name,
 			ClientID:       "client-id",
@@ -547,6 +558,7 @@ func TestIsTokenValidRenewalCalculation(t *testing.T) {
 			ac.tokens[key] = &CachedAzureToken{
 				Token:          "test-token",
 				ExpirationTime: time.Now().Add(tt.timeRemaining),
+					IssuedAt:       time.Now(),
 				Namespace:      "default",
 				ServiceAccount: "test-sa",
 				ClientID:       "client-id",

@@ -65,7 +65,7 @@ func NewRealPatchClient(client spcclient.Interface) *RealPatchClient {
 	}
 }
 
-// PatchSecretProviderClass updates a SecretProviderClass with new objects and secretObjects
-func (c *RealPatchClient) PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
-	return update.PatchSecretProviderClass(ctx, c.client, namespace, name, objectsYAML, secretObjects, timestamp)
+// PatchSecretProviderClass updates a SecretProviderClass with new objects, secretObjects, and annotations
+func (c *RealPatchClient) PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
+	return update.PatchSecretProviderClass(ctx, c.client, namespace, name, objectsYAML, secretObjects, annotations, timestamp)
 }

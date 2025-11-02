@@ -34,8 +34,6 @@ type FilterResult struct {
 
 // TagFilterConfig contains the configuration for tag filtering
 type TagFilterConfig struct {
-	// RespectTags indicates whether tag filtering is enabled
-	RespectTags bool
 	// ServiceLabel is the service label from the SPC
 	ServiceLabel string
 	// EnvironmentLabel is the environment label from the SPC (optional)
@@ -64,8 +62,8 @@ func getTagValue(tags map[string]*string, key string) string {
 // based on its tags and the SecretProviderClass configuration.
 //
 // Decision tree:
-// 1. If respect-tags is disabled → Include (current behavior)
-// 2. If respect-tags is enabled:
+// 1. If SPC has no service/environment labels (single-tenant mode) → Include all
+// 2. If SPC has service/environment labels (multi-tenant mode):
 //    a. If vault has no service tag → Reject
 //    b. If service tag doesn't match SPC → Reject
 //    c. If service matches and vault has no environment tag → Include
@@ -73,21 +71,22 @@ func getTagValue(tags map[string]*string, key string) string {
 //    e. If environment tags don't match → Reject
 //    f. If both service and environment match → Include
 func MatchesTags(vaultTags map[string]*string, config TagFilterConfig) FilterResult {
-	// Path 1: respect-tags disabled → Include all
-	if !config.RespectTags {
-		return FilterResult{
-			Include: true,
-			Reason:  ReasonIncluded,
-		}
-	}
-
 	// Extract and normalize tag values
 	vaultService := normalizeTag(getTagValue(vaultTags, "service"))
 	vaultEnvironment := normalizeTag(getTagValue(vaultTags, "environment"))
 	spcService := normalizeTag(config.ServiceLabel)
 	spcEnvironment := normalizeTag(config.EnvironmentLabel)
 
-	// Path 2: No service tag in vault → Reject (strict mode)
+	// Path 1: Single-tenant mode (no service/environment labels on SPC) → Include all
+	// This allows vaults without service/environment tags to work with simple SPCs
+	if spcService == "" && spcEnvironment == "" {
+		return FilterResult{
+			Include: true,
+			Reason:  ReasonIncluded,
+		}
+	}
+
+	// Path 3: Multi-tenant mode - service tag required in vault
 	if vaultService == "" {
 		return FilterResult{
 			Include: false,
@@ -95,7 +94,7 @@ func MatchesTags(vaultTags map[string]*string, config TagFilterConfig) FilterRes
 		}
 	}
 
-	// Path 3: Service tag mismatch → Reject
+	// Path 4: Service tag mismatch → Reject
 	if vaultService != spcService {
 		return FilterResult{
 			Include: false,
