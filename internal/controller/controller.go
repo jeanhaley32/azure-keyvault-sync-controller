@@ -247,8 +247,15 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Kubernetes token",
 		    "namespace", namespace, "serviceAccount", serviceAccount, "clientID", clientID)
 
-	// Debug: Print token snippet
-	tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
+	// Debug: Print token snippet (with length check to prevent panic)
+	var tokenSnippet string
+	if len(token) >= 10 {
+		tokenSnippet = fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
+	} else if len(token) > 0 {
+		tokenSnippet = token[:min(len(token), 5)] + "..."
+	} else {
+		tokenSnippet = "<empty>"
+	}
 	slog.Debug("Kubernetes token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", tokenSnippet)
 
 	// Extract tenantID
@@ -273,8 +280,15 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Azure AD token",
 		    "namespace", namespace, "serviceAccount", serviceAccount)
 
-	// Debug: Print Azure token snippet
-	azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
+	// Debug: Print Azure token snippet (with length check to prevent panic)
+	var azureTokenSnippet string
+	if len(azureToken) >= 20 {
+		azureTokenSnippet = fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
+	} else if len(azureToken) > 0 {
+		azureTokenSnippet = azureToken[:min(len(azureToken), 10)] + "..."
+	} else {
+		azureTokenSnippet = "<empty>"
+	}
 	slog.Debug("Azure AD token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", azureTokenSnippet)
 
 	// Extract vault name
@@ -1154,7 +1168,7 @@ func (ctrl *Controller) watchSecrets(ctx context.Context) {
 			// Process each Secret
 			for _, secret := range secrets.Items {
 				// Only process Secrets managed by secrets-store.csi.k8s.io
-				if secret.Labels["secrets-store.csi.k8s.io/managed"] != "true" {
+				if secret.Labels == nil || secret.Labels["secrets-store.csi.k8s.io/managed"] != "true" {
 					continue
 				}
 
@@ -1208,10 +1222,15 @@ func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *
 
 	// Check if annotations need updating
 	needsUpdate := false
-	for key, desiredValue := range desiredAnnotations {
-		if currentValue, exists := secret.Annotations[key]; !exists || currentValue != desiredValue {
-			needsUpdate = true
-			break
+	if secret.Annotations == nil {
+		// No existing annotations, need to update
+		needsUpdate = true
+	} else {
+		for key, desiredValue := range desiredAnnotations {
+			if currentValue, exists := secret.Annotations[key]; !exists || currentValue != desiredValue {
+				needsUpdate = true
+				break
+			}
 		}
 	}
 
@@ -1236,8 +1255,10 @@ func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *
 // findSPCForSecret finds the SecretProviderClass that manages a given Secret
 func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Secret) (string, error) {
 	// Check for the secretProviderClass label (added by CSI driver)
-	if spcName, exists := secret.Labels["secrets-store.csi.k8s.io/secretProviderClass"]; exists {
-		return spcName, nil
+	if secret.Labels != nil {
+		if spcName, exists := secret.Labels["secrets-store.csi.k8s.io/secretProviderClass"]; exists {
+			return spcName, nil
+		}
 	}
 
 	// Fallback: Search for SPC with matching secretObjects

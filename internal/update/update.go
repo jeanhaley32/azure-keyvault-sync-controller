@@ -146,9 +146,11 @@ func PatchSecretProviderClass(
 
 	// Add per-secret annotations from vault tags
 	for key, value := range annotations {
-		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
-		escapedKey := strings.ReplaceAll(key, "/", "~1")
-		escapedKey = strings.ReplaceAll(escapedKey, "~", "~0")
+		// Escape annotation keys per JSON Pointer RFC 6901
+		// IMPORTANT: Must escape ~ first, then / (order matters!)
+		// ~ becomes ~0, / becomes ~1
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
 		patch = append(patch, map[string]interface{}{
 			"op":    "add",
 			"path":  "/metadata/annotations/" + escapedKey,
@@ -245,11 +247,16 @@ func secretObjectsEqual(a, b *secretsstorev1.SecretObject) bool {
 		return false
 	}
 
-	// Compare Labels
-	for k, v := range a.Labels {
-		if b.Labels[k] != v {
-			return false
+	// Compare Labels (handle nil maps)
+	if a.Labels != nil && b.Labels != nil {
+		for k, v := range a.Labels {
+			if b.Labels[k] != v {
+				return false
+			}
 		}
+	} else if (a.Labels == nil) != (b.Labels == nil) {
+		// One is nil, the other isn't - they're different
+		return false
 	}
 
 	if len(a.Data) == 0 {
