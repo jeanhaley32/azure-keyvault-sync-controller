@@ -901,6 +901,36 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 			"secretObjectCount", len(generatedSecretObjects))
 	}
 
+	// Collect annotations and labels from vault tags
+	// Annotations: k8s-annotation. prefix
+	// Labels: k8s-label. prefix
+	// These will be stored in the SPC and applied to Secrets by the Secret watcher
+	spcAnnotations := make(map[string]string)
+	for _, secret := range secrets {
+		// Only process secrets that have sync opt-in tag
+		if update.ShouldSyncSecret(secret.Tags) {
+			// Collect annotations
+			secretAnnotations := azure.TransformTagsToSPCAnnotations(secret.Name, secret.Tags)
+			for k, v := range secretAnnotations {
+				spcAnnotations[k] = v
+			}
+
+			// Collect labels (stored as annotations with different prefix)
+			secretLabels := azure.TransformTagsToSPCLabels(secret.Name, secret.Tags)
+			for k, v := range secretLabels {
+				spcAnnotations[k] = v
+			}
+		}
+	}
+
+	if len(spcAnnotations) > 0 {
+		spc.ObjectMeta.Annotations = spcAnnotations
+		slog.Info("Collected annotations and labels from vault tags for CRD-based SPC",
+			"namespace", akv.Namespace,
+			"name", akv.Name,
+			"totalCount", len(spcAnnotations))
+	}
+
 	return spc
 }
 
@@ -959,6 +989,25 @@ func compareSecretObjects(existing, desired []*secretsstorev1.SecretObject) bool
 			if objectName, exists := existingData[data.Key]; !exists || objectName != data.ObjectName {
 				return false
 			}
+		}
+	}
+
+	return true
+}
+
+// compareAnnotations compares two annotation maps for equality
+// Returns true if they are equal, false if different
+func compareAnnotations(existing, desired map[string]string) bool {
+	// Different lengths means different
+	if len(existing) != len(desired) {
+		return false
+	}
+
+	// Check each desired annotation exists in existing with same value
+	for key, desiredValue := range desired {
+		existingValue, exists := existing[key]
+		if !exists || existingValue != desiredValue {
+			return false
 		}
 	}
 
@@ -1072,8 +1121,9 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 		// SPC exists, check if update is needed
 		objectsChanged := existingSPC.Spec.Parameters["objects"] != desiredSPC.Spec.Parameters["objects"]
 		secretObjectsChanged := !compareSecretObjects(existingSPC.Spec.SecretObjects, desiredSPC.Spec.SecretObjects)
+		annotationsChanged := !compareAnnotations(existingSPC.ObjectMeta.Annotations, desiredSPC.ObjectMeta.Annotations)
 
-		if !objectsChanged && !secretObjectsChanged {
+		if !objectsChanged && !secretObjectsChanged && !annotationsChanged {
 			slog.Info("No changes detected - skipping SPC update",
 				"namespace", namespace,
 				"name", name)
@@ -1082,10 +1132,12 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 				"namespace", namespace,
 				"name", name,
 				"objectsChanged", objectsChanged,
-				"secretObjectsChanged", secretObjectsChanged)
+				"secretObjectsChanged", secretObjectsChanged,
+				"annotationsChanged", annotationsChanged)
 
-			// Update the spec
+			// Update the spec and annotations
 			existingSPC.Spec = desiredSPC.Spec
+			existingSPC.ObjectMeta.Annotations = desiredSPC.ObjectMeta.Annotations
 			existingSPC.OwnerReferences = desiredSPC.OwnerReferences
 
 			_, updateErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Update(
@@ -1188,7 +1240,7 @@ func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *
 	namespace := secret.Namespace
 	name := secret.Name
 
-	slog.Debug("Reconciling Secret annotations",
+	slog.Debug("Reconciling Secret metadata (annotations and labels)",
 		"namespace", namespace,
 		"name", name)
 
@@ -1212,42 +1264,60 @@ func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *
 		return fmt.Errorf("failed to get SPC: %w", err)
 	}
 
-	// Extract annotations for this Secret from SPC metadata
+	// Extract annotations and labels for this Secret from SPC metadata
 	desiredAnnotations := azure.ExtractAnnotationsForSecret(spc.Annotations, name)
+	desiredLabels := azure.ExtractLabelsForSecret(spc.Annotations, name)
 
-	if len(desiredAnnotations) == 0 {
-		slog.Debug("No annotations to apply for Secret", "namespace", namespace, "name", name)
+	if len(desiredAnnotations) == 0 && len(desiredLabels) == 0 {
+		slog.Debug("No annotations or labels to apply for Secret", "namespace", namespace, "name", name)
 		return nil
 	}
 
 	// Check if annotations need updating
-	needsUpdate := false
-	if secret.Annotations == nil {
-		// No existing annotations, need to update
-		needsUpdate = true
-	} else {
-		for key, desiredValue := range desiredAnnotations {
-			if currentValue, exists := secret.Annotations[key]; !exists || currentValue != desiredValue {
-				needsUpdate = true
-				break
+	annotationsNeedUpdate := false
+	if len(desiredAnnotations) > 0 {
+		if secret.Annotations == nil {
+			annotationsNeedUpdate = true
+		} else {
+			for key, desiredValue := range desiredAnnotations {
+				if currentValue, exists := secret.Annotations[key]; !exists || currentValue != desiredValue {
+					annotationsNeedUpdate = true
+					break
+				}
 			}
 		}
 	}
 
-	if !needsUpdate {
-		slog.Debug("Secret annotations already up to date", "namespace", namespace, "name", name)
+	// Check if labels need updating
+	labelsNeedUpdate := false
+	if len(desiredLabels) > 0 {
+		if secret.Labels == nil {
+			labelsNeedUpdate = true
+		} else {
+			for key, desiredValue := range desiredLabels {
+				if currentValue, exists := secret.Labels[key]; !exists || currentValue != desiredValue {
+					labelsNeedUpdate = true
+					break
+				}
+			}
+		}
+	}
+
+	if !annotationsNeedUpdate && !labelsNeedUpdate {
+		slog.Debug("Secret metadata already up to date", "namespace", namespace, "name", name)
 		return nil
 	}
 
-	// Apply annotations to Secret
-	if err := ctrl.patchSecretAnnotations(ctx, secret, desiredAnnotations); err != nil {
-		return fmt.Errorf("failed to patch Secret annotations: %w", err)
+	// Apply annotations and labels to Secret
+	if err := ctrl.patchSecretMetadata(ctx, secret, desiredAnnotations, desiredLabels); err != nil {
+		return fmt.Errorf("failed to patch Secret metadata: %w", err)
 	}
 
-	slog.Info("Applied annotations to Secret",
+	slog.Info("Applied metadata to Secret",
 		"namespace", namespace,
 		"name", name,
-		"annotationCount", len(desiredAnnotations))
+		"annotationCount", len(desiredAnnotations),
+		"labelCount", len(desiredLabels))
 
 	return nil
 }
@@ -1282,12 +1352,12 @@ func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Sec
 }
 
 // patchSecretAnnotations applies annotations to a Secret using JSON Patch
-func (ctrl *Controller) patchSecretAnnotations(ctx context.Context, secret *corev1.Secret, annotations map[string]string) error {
+func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.Secret, annotations map[string]string, labels map[string]string) error {
 	// Build JSON Patch operations
 	var patchOps []map[string]interface{}
 
-	// Ensure annotations map exists
-	if secret.Annotations == nil {
+	// Ensure annotations map exists if we have annotations to add
+	if len(annotations) > 0 && secret.Annotations == nil {
 		patchOps = append(patchOps, map[string]interface{}{
 			"op":    "add",
 			"path":  "/metadata/annotations",
@@ -1304,6 +1374,28 @@ func (ctrl *Controller) patchSecretAnnotations(ctx context.Context, secret *core
 		patchOps = append(patchOps, map[string]interface{}{
 			"op":    "add",
 			"path":  "/metadata/annotations/" + escapedKey,
+			"value": value,
+		})
+	}
+
+	// Ensure labels map exists if we have labels to add
+	if len(labels) > 0 && secret.Labels == nil {
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/labels",
+			"value": map[string]string{},
+		})
+	}
+
+	// Add each label
+	for key, value := range labels {
+		// Escape forward slashes in label keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/labels/" + escapedKey,
 			"value": value,
 		})
 	}

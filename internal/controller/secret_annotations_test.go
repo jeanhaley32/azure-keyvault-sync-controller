@@ -364,7 +364,7 @@ func TestPatchSecretAnnotations(t *testing.T) {
 			}
 
 			// Call patchSecretAnnotations
-			err := ctrl.patchSecretAnnotations(ctx, tt.secret, tt.annotationsToPatch)
+			err := ctrl.patchSecretMetadata(ctx, tt.secret, tt.annotationsToPatch, nil)
 
 			// Assert error expectation
 			if tt.expectError {
