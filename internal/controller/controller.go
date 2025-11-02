@@ -1398,7 +1398,18 @@ func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Sec
 		}
 	}
 
-	// Fallback: Search for SPC with matching secretObjects
+	// Use cache index for O(1) lookup
+	spcName := ctrl.cache.FindSPCForSecret(secret.Namespace, secret.Name)
+	if spcName != "" {
+		return spcName, nil
+	}
+
+	// Final fallback: Search for SPC with matching secretObjects
+	// This should rarely be needed if the cache is properly maintained
+	slog.Debug("Cache miss for secret lookup, falling back to API list",
+		"namespace", secret.Namespace,
+		"secretName", secret.Name)
+
 	spcList, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(secret.Namespace).List(
 		ctx,
 		metav1.ListOptions{},
