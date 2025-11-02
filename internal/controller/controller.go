@@ -249,16 +249,11 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Kubernetes token",
 		    "namespace", namespace, "serviceAccount", serviceAccount, "clientID", clientID)
 
-	// Debug: Print token snippet (with length check to prevent panic)
-	var tokenSnippet string
-	if len(token) >= 10 {
-		tokenSnippet = fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
-	} else if len(token) > 0 {
-		tokenSnippet = token[:min(len(token), 5)] + "..."
-	} else {
-		tokenSnippet = "<empty>"
-	}
-	slog.Debug("Kubernetes token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", tokenSnippet)
+	// Debug: Log token length for verification (never log token content)
+	slog.Debug("Kubernetes token acquired",
+		"namespace", namespace,
+		"serviceAccount", serviceAccount,
+		"tokenLength", len(token))
 
 	// Extract tenantID
 	tenantID, ok := obj.Spec.Parameters["tenantId"]
@@ -282,16 +277,11 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Azure AD token",
 		    "namespace", namespace, "serviceAccount", serviceAccount)
 
-	// Debug: Print Azure token snippet (with length check to prevent panic)
-	var azureTokenSnippet string
-	if len(azureToken) >= 20 {
-		azureTokenSnippet = fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
-	} else if len(azureToken) > 0 {
-		azureTokenSnippet = azureToken[:min(len(azureToken), 10)] + "..."
-	} else {
-		azureTokenSnippet = "<empty>"
-	}
-	slog.Debug("Azure AD token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", azureTokenSnippet)
+	// Debug: Log token length for verification (never log token content)
+	slog.Debug("Azure AD token acquired",
+		"namespace", namespace,
+		"serviceAccount", serviceAccount,
+		"tokenLength", len(azureToken))
 
 	// Extract vault name
 	keyvaultName, ok := obj.Spec.Parameters["keyvaultName"]
