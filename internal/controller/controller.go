@@ -27,6 +27,7 @@ import (
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -886,9 +887,15 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	// Add objects array to parameters as YAML/JSON
 	// The CSI driver expects this as a YAML string
 	if len(objects) > 0 {
-		// For now, we'll build a simple array string
-		// In production, this should be proper YAML marshaling
-		spc.Spec.Parameters["objects"] = buildObjectsArrayString(objects)
+		objectsYAML, err := buildObjectsArrayString(objects)
+		if err != nil {
+			slog.Error("Failed to marshal objects array to YAML",
+				"namespace", akv.Namespace,
+				"name", akv.Name,
+				"error", err)
+			return nil
+		}
+		spc.Spec.Parameters["objects"] = objectsYAML
 	}
 
 	// Generate secretObjects based on vault tags (secret-object=true)
@@ -935,19 +942,20 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	return spc
 }
 
-// buildObjectsArrayString builds the objects array string for SPC parameters
-func buildObjectsArrayString(objects []map[string]interface{}) string {
-	// This is a simplified version - in production use proper YAML marshaling
-	result := "array:\n"
-	for _, obj := range objects {
-		result += "  - |\n"
-		result += fmt.Sprintf("    objectName: %s\n", obj["objectName"])
-		result += fmt.Sprintf("    objectType: %s\n", obj["objectType"])
-		if alias, exists := obj["objectAlias"]; exists {
-			result += fmt.Sprintf("    objectAlias: %s\n", alias)
-		}
+// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling
+func buildObjectsArrayString(objects []map[string]interface{}) (string, error) {
+	// Wrap the objects array in a map with "array" key as expected by the CSI driver
+	wrapper := map[string]interface{}{
+		"array": objects,
 	}
-	return result
+
+	// Marshal to YAML using safe library to prevent injection vulnerabilities
+	yamlBytes, err := yaml.Marshal(wrapper)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal objects array to YAML: %w", err)
+	}
+
+	return string(yamlBytes), nil
 }
 
 // compareSecretObjects compares two SecretObject slices for equality
