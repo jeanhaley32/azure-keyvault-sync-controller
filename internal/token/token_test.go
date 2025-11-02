@@ -687,3 +687,202 @@ func TestTokenConstants(t *testing.T) {
 	assert.Equal(t, "api://AzureADTokenExchange", tokenAudience)
 	assert.Equal(t, 0.8, tokenRenewalThreshold)
 }
+
+// TestCleanupExpired tests the cleanup of expired tokens
+func TestCleanupExpired(t *testing.T) {
+	tests := []struct {
+		name          string
+		setupCache    func(*TokenCache)
+		expectedCount int
+	}{
+		{
+			name: "cleanup expired tokens",
+			setupCache: func(tc *TokenCache) {
+				// Add expired token
+				tc.tokens["default/expired-sa"] = &CachedToken{
+					Token:          "expired-token",
+					ExpirationTime: time.Now().Add(-1 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "expired-sa",
+				}
+				// Add valid token
+				tc.tokens["default/valid-sa"] = &CachedToken{
+					Token:          "valid-token",
+					ExpirationTime: time.Now().Add(1 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "valid-sa",
+				}
+			},
+			expectedCount: 1, // Only valid token remains
+		},
+		{
+			name: "no expired tokens",
+			setupCache: func(tc *TokenCache) {
+				tc.tokens["default/sa1"] = &CachedToken{
+					Token:          "token1",
+					ExpirationTime: time.Now().Add(1 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "sa1",
+				}
+				tc.tokens["default/sa2"] = &CachedToken{
+					Token:          "token2",
+					ExpirationTime: time.Now().Add(2 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "sa2",
+				}
+			},
+			expectedCount: 2, // Both tokens remain
+		},
+		{
+			name: "all tokens expired",
+			setupCache: func(tc *TokenCache) {
+				tc.tokens["default/sa1"] = &CachedToken{
+					Token:          "token1",
+					ExpirationTime: time.Now().Add(-1 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "sa1",
+				}
+				tc.tokens["default/sa2"] = &CachedToken{
+					Token:          "token2",
+					ExpirationTime: time.Now().Add(-2 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "sa2",
+				}
+			},
+			expectedCount: 0, // All tokens removed
+		},
+		{
+			name: "empty cache",
+			setupCache: func(tc *TokenCache) {
+				// No tokens
+			},
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := NewTokenCache()
+			tt.setupCache(tc)
+
+			tc.cleanupExpired()
+
+			assert.Equal(t, tt.expectedCount, len(tc.tokens))
+		})
+	}
+}
+
+// TestStartCleanup tests the cleanup goroutine
+func TestStartCleanup(t *testing.T) {
+	tc := NewTokenCache()
+
+	// Add some tokens
+	tc.tokens["default/sa1"] = &CachedToken{
+		Token:          "token1",
+		ExpirationTime: time.Now().Add(100 * time.Millisecond),
+		Namespace:      "default",
+		ServiceAccount: "sa1",
+	}
+	tc.tokens["default/sa2"] = &CachedToken{
+		Token:          "token2",
+		ExpirationTime: time.Now().Add(1 * time.Hour),
+		Namespace:      "default",
+		ServiceAccount: "sa2",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start cleanup with short interval
+	go tc.StartCleanup(ctx, 200*time.Millisecond)
+
+	// Initially should have 2 tokens
+	assert.Equal(t, 2, len(tc.tokens))
+
+	// Wait for first token to expire and cleanup to run
+	time.Sleep(400 * time.Millisecond)
+
+	// Should have only 1 token now (expired one removed)
+	tc.mu.RLock()
+	count := len(tc.tokens)
+	tc.mu.RUnlock()
+	assert.Equal(t, 1, count)
+
+	// Cancel context and verify cleanup stops
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestStartCleanupContextCancellation tests cleanup goroutine stops on context cancellation
+func TestStartCleanupContextCancellation(t *testing.T) {
+	tc := NewTokenCache()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start cleanup
+	done := make(chan struct{})
+	go func() {
+		tc.StartCleanup(ctx, 100*time.Millisecond)
+		close(done)
+	}()
+
+	// Cancel context immediately
+	cancel()
+
+	// Wait for cleanup to stop (with timeout)
+	select {
+	case <-done:
+		// Success - cleanup stopped
+	case <-time.After(1 * time.Second):
+		t.Fatal("Cleanup goroutine did not stop after context cancellation")
+	}
+}
+
+// TestCleanupThreadSafety tests thread safety of cleanup operations
+func TestCleanupThreadSafety(t *testing.T) {
+	tc := NewTokenCache()
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start cleanup goroutine
+	go tc.StartCleanup(ctx, 50*time.Millisecond)
+
+	// Concurrent token additions
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				key := tokenCacheKey("default", "sa")
+				tc.mu.Lock()
+				tc.tokens[key] = &CachedToken{
+					Token:          "token",
+					ExpirationTime: time.Now().Add(100 * time.Millisecond),
+					Namespace:      "default",
+					ServiceAccount: "sa",
+				}
+				tc.mu.Unlock()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}(i)
+	}
+
+	// Concurrent reads
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = tc.IsTokenValid("default", "sa")
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// If we get here without race detector errors, test passes
+	assert.NotNil(t, tc)
+}

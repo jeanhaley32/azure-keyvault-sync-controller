@@ -2,6 +2,7 @@ package azure
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -572,4 +573,230 @@ func TestIsTokenValidRenewalCalculation(t *testing.T) {
 			delete(ac.tokens, key)
 		})
 	}
+}
+
+// TestCleanupExpired tests the cleanup of expired Azure tokens
+func TestCleanupExpired(t *testing.T) {
+	tests := []struct {
+		name          string
+		setupCache    func(*AzureTokenCache)
+		expectedCount int
+	}{
+		{
+			name: "cleanup expired tokens",
+			setupCache: func(ac *AzureTokenCache) {
+				// Add expired token
+				ac.tokens["default/expired-sa"] = &CachedAzureToken{
+					Token:          "expired-token",
+					ExpirationTime: time.Now().Add(-1 * time.Hour),
+					IssuedAt:       time.Now().Add(-2 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "expired-sa",
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+				// Add valid token
+				ac.tokens["default/valid-sa"] = &CachedAzureToken{
+					Token:          "valid-token",
+					ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
+					Namespace:      "default",
+					ServiceAccount: "valid-sa",
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+			},
+			expectedCount: 1, // Only valid token remains
+		},
+		{
+			name: "no expired tokens",
+			setupCache: func(ac *AzureTokenCache) {
+				ac.tokens["default/sa1"] = &CachedAzureToken{
+					Token:          "token1",
+					ExpirationTime: time.Now().Add(1 * time.Hour),
+					IssuedAt:       time.Now(),
+					Namespace:      "default",
+					ServiceAccount: "sa1",
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+				ac.tokens["default/sa2"] = &CachedAzureToken{
+					Token:          "token2",
+					ExpirationTime: time.Now().Add(2 * time.Hour),
+					IssuedAt:       time.Now(),
+					Namespace:      "default",
+					ServiceAccount: "sa2",
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+			},
+			expectedCount: 2, // Both tokens remain
+		},
+		{
+			name: "all tokens expired",
+			setupCache: func(ac *AzureTokenCache) {
+				ac.tokens["default/sa1"] = &CachedAzureToken{
+					Token:          "token1",
+					ExpirationTime: time.Now().Add(-1 * time.Hour),
+					IssuedAt:       time.Now().Add(-2 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "sa1",
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+				ac.tokens["default/sa2"] = &CachedAzureToken{
+					Token:          "token2",
+					ExpirationTime: time.Now().Add(-3 * time.Hour),
+					IssuedAt:       time.Now().Add(-4 * time.Hour),
+					Namespace:      "default",
+					ServiceAccount: "sa2",
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+			},
+			expectedCount: 0, // All tokens removed
+		},
+		{
+			name: "empty cache",
+			setupCache: func(ac *AzureTokenCache) {
+				// No tokens
+			},
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ac := NewAzureTokenCache()
+			tt.setupCache(ac)
+
+			ac.cleanupExpired()
+
+			assert.Equal(t, tt.expectedCount, len(ac.tokens))
+		})
+	}
+}
+
+// TestStartCleanup tests the cleanup goroutine for Azure tokens
+func TestStartCleanup(t *testing.T) {
+	ac := NewAzureTokenCache()
+
+	// Add some tokens
+	ac.tokens["default/sa1"] = &CachedAzureToken{
+		Token:          "token1",
+		ExpirationTime: time.Now().Add(100 * time.Millisecond),
+		IssuedAt:       time.Now(),
+		Namespace:      "default",
+		ServiceAccount: "sa1",
+		ClientID:       "client-id",
+		TenantID:       "tenant-id",
+	}
+	ac.tokens["default/sa2"] = &CachedAzureToken{
+		Token:          "token2",
+		ExpirationTime: time.Now().Add(1 * time.Hour),
+		IssuedAt:       time.Now(),
+		Namespace:      "default",
+		ServiceAccount: "sa2",
+		ClientID:       "client-id",
+		TenantID:       "tenant-id",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start cleanup with short interval
+	go ac.StartCleanup(ctx, 200*time.Millisecond)
+
+	// Initially should have 2 tokens
+	assert.Equal(t, 2, len(ac.tokens))
+
+	// Wait for first token to expire and cleanup to run
+	time.Sleep(400 * time.Millisecond)
+
+	// Should have only 1 token now (expired one removed)
+	ac.mu.RLock()
+	count := len(ac.tokens)
+	ac.mu.RUnlock()
+	assert.Equal(t, 1, count)
+
+	// Cancel context and verify cleanup stops
+	cancel()
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestStartCleanupContextCancellation tests cleanup goroutine stops on context cancellation
+func TestStartCleanupContextCancellation(t *testing.T) {
+	ac := NewAzureTokenCache()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start cleanup
+	done := make(chan struct{})
+	go func() {
+		ac.StartCleanup(ctx, 100*time.Millisecond)
+		close(done)
+	}()
+
+	// Cancel context immediately
+	cancel()
+
+	// Wait for cleanup to stop (with timeout)
+	select {
+	case <-done:
+		// Success - cleanup stopped
+	case <-time.After(1 * time.Second):
+		t.Fatal("Cleanup goroutine did not stop after context cancellation")
+	}
+}
+
+// TestCleanupThreadSafety tests thread safety of Azure token cleanup operations
+func TestCleanupThreadSafety(t *testing.T) {
+	ac := NewAzureTokenCache()
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start cleanup goroutine
+	go ac.StartCleanup(ctx, 50*time.Millisecond)
+
+	// Concurrent token additions
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				key := fmt.Sprintf("default/sa-%d", id)
+				ac.mu.Lock()
+				ac.tokens[key] = &CachedAzureToken{
+					Token:          "token",
+					ExpirationTime: time.Now().Add(100 * time.Millisecond),
+					IssuedAt:       time.Now(),
+					Namespace:      "default",
+					ServiceAccount: fmt.Sprintf("sa-%d", id),
+					ClientID:       "client-id",
+					TenantID:       "tenant-id",
+				}
+				ac.mu.Unlock()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}(i)
+	}
+
+	// Concurrent reads
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = ac.IsTokenValid("default", fmt.Sprintf("sa-%d", id))
+				time.Sleep(5 * time.Millisecond)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// If we get here without race detector errors, test passes
+	assert.NotNil(t, ac)
 }

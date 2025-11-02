@@ -134,6 +134,46 @@ func (tc *TokenCache) GetToken(ctx context.Context, clientset kubernetes.Interfa
 	return token, nil
 }
 
+// cleanupExpired removes expired tokens from the cache
+func (tc *TokenCache) cleanupExpired() {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+
+	for key, cached := range tc.tokens {
+		if now.After(cached.ExpirationTime) {
+			delete(tc.tokens, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		slog.Info("Cleaned up expired Kubernetes tokens from cache",
+			"removed", removed,
+			"remaining", len(tc.tokens))
+	}
+}
+
+// StartCleanup starts a background goroutine that periodically removes expired tokens
+func (tc *TokenCache) StartCleanup(ctx context.Context, interval time.Duration) {
+	slog.Info("Starting Kubernetes token cache cleanup routine", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Kubernetes token cache cleanup routine shutting down")
+			return
+		case <-ticker.C:
+			tc.cleanupExpired()
+		}
+	}
+}
+
 // ExtractClientID extracts the clientID from SecretProviderClass spec.parameters
 func ExtractClientID(obj *unstructured.Unstructured) (string, error) {
 	clientID, found, err := unstructured.NestedString(obj.Object, "spec", "parameters", "clientID")

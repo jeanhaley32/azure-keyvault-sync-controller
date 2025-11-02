@@ -198,6 +198,46 @@ func (ac *AzureTokenCache) exchangeToken(
 	return tokenResponse.Token, tokenResponse.ExpiresOn, nil
 }
 
+// cleanupExpired removes expired Azure tokens from the cache
+func (ac *AzureTokenCache) cleanupExpired() {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+
+	for key, cached := range ac.tokens {
+		if now.After(cached.ExpirationTime) {
+			delete(ac.tokens, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		slog.Info("Cleaned up expired Azure AD tokens from cache",
+			"removed", removed,
+			"remaining", len(ac.tokens))
+	}
+}
+
+// StartCleanup starts a background goroutine that periodically removes expired tokens
+func (ac *AzureTokenCache) StartCleanup(ctx context.Context, interval time.Duration) {
+	slog.Info("Starting Azure AD token cache cleanup routine", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Azure AD token cache cleanup routine shutting down")
+			return
+		case <-ticker.C:
+			ac.cleanupExpired()
+		}
+	}
+}
+
 // ExtractTenantID extracts the tenantId from a SecretProviderClass spec
 func ExtractTenantID(obj *unstructured.Unstructured) (string, error) {
 	tenantID, found, err := unstructured.NestedString(obj.Object, "spec", "parameters", "tenantId")

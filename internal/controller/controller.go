@@ -1529,6 +1529,10 @@ func (ctrl *Controller) Run(ctx context.Context) {
 	// Start Secret watcher for annotation synchronization
 	go ctrl.watchSecrets(ctx)
 
+	// Start token cache cleanup routines
+	go ctrl.tokenCache.StartCleanup(ctx, 5*time.Minute)
+	go ctrl.azureTokenCache.StartCleanup(ctx, 5*time.Minute)
+
 	// Start worker pool
 	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)
 	for range ctrl.config.WorkerCount {

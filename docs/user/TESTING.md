@@ -6,14 +6,14 @@ This guide covers how to test the controller on your staging cluster.
 
 ### ✅ On Staging (Merged)
 1. **Annotation Mode** - Original SPC management with service-account annotation
-2. **CRD Mode** - AzureKeyVaultSync CRD with automatic SPC generation (PR #41)
+2. **CRD Mode** - AzureKeyVaultSync CRD with automatic SPC generation
 3. **Tag Filtering** - Filter vault secrets by service/environment tags
-4. **Metrics & Observability** - Prometheus metrics on port 9090 (PR #42)
-
-### 🆕 On Feature Branch (Phase 6)
-5. **Secret Annotation Sync** - Automatic metadata flow from vault tags to Secret annotations
-   - Branch: `feature/phase-6-secret-annotation-sync`
-   - Enables kubernetes-reflector integration
+4. **Metrics & Observability** - Prometheus metrics on port 9090
+5. **Secret Metadata Sync (Phase 6)** - Complete annotation and label synchronization
+   - **Annotations:** `k8s-annotation.*` vault tags → Secret annotations
+   - **Labels:** `k8s-label.*` vault tags → Secret labels
+   - **Safe Removal:** Tracking annotations for automatic cleanup
+   - **Integration:** Works with Reflector and other tools
 
 ## Prerequisites
 
@@ -166,11 +166,11 @@ kubectl apply -f filtered-sync.yaml
 kubectl get akvs prod-app-sync -o jsonpath='{.status.secretCount}'
 ```
 
-## Testing Secret Annotation Sync (Phase 6)
+## Testing Secret Metadata Sync (Phase 6)
 
-> **Note:** This requires deploying from the `feature/phase-6-secret-annotation-sync` branch
+Phase 6 enables automatic synchronization of annotations and labels from Azure Key Vault tags to Kubernetes Secrets.
 
-### Step 1: Tag Azure Secrets with Annotations
+### Step 1: Tag Azure Secrets with Annotations and Labels
 
 ```bash
 # Add kubernetes-reflector annotations
@@ -230,12 +230,91 @@ kubectl get secret api-key -o jsonpath='{.metadata.annotations}' | jq
 # }
 ```
 
-### Step 4: Test with Kubernetes Reflector
+### Step 4: Test Label Synchronization
+
+Labels are synced using the `k8s-label.*` prefix and stored as JSON in the SPC:
+
+```bash
+# Add labels to a vault secret
+az keyvault secret set-attribute \
+  --vault-name your-vault \
+  --name api-key \
+  --tags \
+    "secret-object=true" \
+    "k8s-label.app=myapp" \
+    "k8s-label.team=platform" \
+    "k8s-label.reflector.v1.k8s.emberstack.com/reflection-allowed=true"
+
+# Wait for controller sync (up to 15 minutes, check controller logs for sync events)
+
+# Check SPC for JSON-encoded labels
+kubectl get secretproviderclass my-vault-sync -o yaml | grep "secret-label.azure-keyvault-sync.io"
+
+# Expected format:
+# secret-label.azure-keyvault-sync.io/api-key: '{"app":"myapp","team":"platform","reflector.v1.k8s.emberstack.com/reflection-allowed":"true"}'
+
+# Verify labels applied to Secret (Secret watcher runs every 30s)
+kubectl get secret api-key -o jsonpath='{.metadata.labels}' | jq
+
+# Expected output:
+# {
+#   "app": "myapp",
+#   "team": "platform",
+#   "reflector.v1.k8s.emberstack.com/reflection-allowed": "true",
+#   "secrets-store.csi.k8s.io/managed": "true"  # System label (not removed)
+# }
+
+# Check for tracking annotation (records managed labels)
+kubectl get secret api-key -o jsonpath='{.metadata.annotations.azure-keyvault-sync\.io/managed-labels}'
+
+# Expected output:
+# app,reflector.v1.k8s.emberstack.com/reflection-allowed,team
+```
+
+### Step 5: Test Safe Metadata Removal
+
+Phase 6 includes tracking annotations to safely remove metadata when vault tags are deleted:
+
+```bash
+# Delete a label tag from vault
+az keyvault secret set-attribute \
+  --vault-name your-vault \
+  --name api-key \
+  --tags \
+    "secret-object=true" \
+    "k8s-label.app=myapp"  # Removed team and reflector labels
+
+# Wait for controller sync (up to 15 minutes)
+# Then wait for Secret watcher (up to 30 seconds)
+
+# Verify labels were removed from Secret
+kubectl get secret api-key -o jsonpath='{.metadata.labels}' | jq
+
+# Expected output (only app label remains):
+# {
+#   "app": "myapp",
+#   "secrets-store.csi.k8s.io/managed": "true"  # System label preserved
+# }
+
+# Verify tracking annotation updated
+kubectl get secret api-key -o jsonpath='{.metadata.annotations.azure-keyvault-sync\.io/managed-labels}'
+
+# Expected output:
+# app
+
+# Check controller logs for removal confirmation
+kubectl logs -f deployment/azure-keyvault-sync-controller -n kube-system | grep "labelsRemoved"
+
+# Expected log:
+# level=INFO msg="Applied metadata to Secret" ... labelsRemoved=2
+```
+
+### Step 6: Test with Kubernetes Reflector
 
 If you have [kubernetes-reflector](https://github.com/emberstack/kubernetes-reflector) installed:
 
 ```bash
-# The annotated Secret should automatically be replicated
+# The labeled Secret should automatically be replicated
 kubectl get secrets -n app-prod | grep shared-secret
 kubectl get secrets -n app-staging | grep shared-secret
 kubectl get secrets -n app-dev | grep shared-secret

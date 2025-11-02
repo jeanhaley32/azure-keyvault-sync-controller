@@ -225,25 +225,88 @@ This roadmap outlines the development plan for the Azure Key Vault Sync Controll
 - [x] Plain YAML manifests (deploy/ directory)
 - [ ] Release process documentation (tagging strategy)
 
-## Phase 6: Advanced Features
+## Phase 6: Secret Metadata Synchronization - ✅ COMPLETE
 
-**Status:** 💡 Future Enhancements
+**Status:** ✅ Complete (Merged to staging)
 
-### 6.1 Advanced Filtering
-- [ ] Annotation-based secret name filtering
-- [ ] Support for secret tags/labels
-- [ ] Exclude patterns
+### 6.1 CRD-Based Architecture
+- [x] AzureKeyVaultSync Custom Resource Definition
+- [x] Controller reconciliation loop (Azure → Kubernetes)
+- [x] Automatic SecretProviderClass generation from CRD
+- [x] Full RBAC configuration for CRD management
 
-### 6.2 Secret Rotation Coordination
-- [ ] Detect secret rotation in vault
-- [ ] Trigger pod restarts on secret changes
-- [ ] Annotation-based restart policies
-- [ ] Integration with external-secrets operator
+**Implementation:**
+- Created `AzureKeyVaultSync` CRD for declarative vault synchronization
+- Integrated controller-runtime for CRD reconciliation
+- Automatic SPC lifecycle management (create, update, delete)
+- CRD validation and status reporting
 
-### 6.3 Backup and Recovery
-- [ ] Backup SecretProviderClass states
-- [ ] Disaster recovery procedures
-- [ ] Manual override mechanisms
+### 6.2 Secret Annotation Synchronization
+- [x] Azure vault tags with `k8s-annotation.*` prefix sync to Secret annotations
+- [x] Annotation transformation and extraction functions
+- [x] SecretProviderClass as intermediate storage
+- [x] Secret watcher for metadata application
+
+**Transformation Format:**
+```
+Azure Tag:     k8s-annotation.reflector/allowed = "true"
+SPC Storage:   secret-metadata.azure-keyvault-sync.io/<secretName>.reflector/allowed: "true"
+Secret Result: reflector/allowed: "true" (annotation)
+```
+
+### 6.3 Secret Label Synchronization
+- [x] Azure vault tags with `k8s-label.*` prefix sync to Secret labels
+- [x] JSON encoding for multiple labels per secret
+- [x] Label extraction and application to Secrets
+- [x] Integration with tools like Reflector for secret replication
+
+**Transformation Format:**
+```
+Azure Tags:    k8s-label.app = "myapp"
+               k8s-label.team = "platform"
+SPC Storage:   secret-label.azure-keyvault-sync.io/<secretName>: '{"app":"myapp","team":"platform"}'
+Secret Result: app: "myapp", team: "platform" (labels)
+```
+
+### 6.4 Safe Metadata Removal
+- [x] Tracking annotations to record managed metadata
+- [x] Automatic cleanup when vault tags deleted
+- [x] Protection for user-added and system labels/annotations
+- [x] Remove operations in JSON Patch
+
+**Tracking Annotations:**
+- `azure-keyvault-sync.io/managed-labels` - Comma-separated list of managed label keys
+- `azure-keyvault-sync.io/managed-annotations` - Comma-separated list of managed annotation keys
+
+**Safety Features:**
+- Only removes metadata explicitly managed by controller
+- Preserves user-added labels and annotations
+- Protects system labels (e.g., `secrets-store.csi.k8s.io/*`)
+- Tracks metadata across controller restarts
+
+### 6.5 Two-Tier Reconciliation Architecture
+- [x] Controller loop - Azure Key Vault → SecretProviderClass (configurable interval, default 15 min)
+- [x] Secret watcher loop - SecretProviderClass → Secrets (30 second polling)
+- [x] No Azure API calls from Secret watcher (pure Kubernetes operations)
+- [x] Cost-optimized API usage
+
+**Architecture Benefits:**
+- Reduced Azure API costs (controller only makes vault calls)
+- Fast metadata propagation to Secrets (30 second loop)
+- Resilient to Azure outages (Secret watcher continues working)
+- SPC acts as cache/buffer between Azure and Secrets
+
+**Cost Efficiency:**
+- 12 vaults, 2 clusters, 15-min sync: ~$1.95/month total
+- 420k vault API calls/year
+- Network transfer free within Azure
+
+### 6.6 Comprehensive Testing
+- [x] Unit tests for annotation/label transformation (255 lines)
+- [x] Secret metadata patching tests (585 lines)
+- [x] CRD validation tests (510 lines)
+- [x] Real-world testing with Reflector integration
+- [x] Token renewal and graceful shutdown fixes
 
 ## Dependencies and Prerequisites
 
@@ -298,14 +361,24 @@ rules:
 
 ## Current Status
 
-**Phase 4 Complete:** ✅ Production-ready controller with full automation
+**Phase 6 Complete:** ✅ Production-ready controller with metadata synchronization
 
-The controller is now feature-complete for production use:
-- Phases 1-4: Complete
-- Work queue architecture: Complete
-- Error handling with retry logic: Complete
-- Azure Key Vault integration: Complete
-- Automatic SecretProviderClass updates: Complete
-- Comprehensive documentation: Complete
+The controller is now feature-complete for production use with comprehensive metadata management:
+- **Phases 1-4:** Complete (Foundation, Token Acquisition, Vault Integration, SPC Updates)
+- **Phase 5:** Partially complete (Observability, Security, Documentation)
+- **Phase 6:** ✅ Complete (Secret Metadata Synchronization)
 
-**Next Steps:** Deploy to production, monitor, and gather feedback for Phase 5 enhancements.
+**Key Capabilities:**
+- ✅ CRD-based declarative vault synchronization
+- ✅ Automatic SecretProviderClass generation and updates
+- ✅ Annotation and label synchronization from vault tags
+- ✅ Safe metadata removal with tracking
+- ✅ Two-tier reconciliation (Azure → K8s → Secrets)
+- ✅ Cost-optimized API usage (~$1.95/month for typical setup)
+- ✅ Comprehensive test coverage (1,350+ test lines)
+
+**Next Steps:**
+- Deploy Phase 6 to production clusters
+- Monitor metadata synchronization in production
+- Gather feedback on CRD-based workflow
+- Consider Phase 7: Advanced features (secret rotation, backup/recovery)

@@ -146,6 +146,7 @@ kubectl get secretproviderclass <name> -o jsonpath='{.metadata.annotations.azure
 **Core Capabilities:**
 - **Automatic Vault Sync** - Discovers and syncs all enabled secrets/certificates from Azure Key Vault
 - **Kubernetes Secret Generation** - Optionally creates Kubernetes Secrets (Opaque and TLS types)
+- **Metadata Synchronization (Phase 6)** - Sync annotations and labels from vault tags to Kubernetes Secrets
 - **Service Account Impersonation** - Uses existing Azure Workload Identity, no centralized credentials
 - **Event-Driven Reconciliation** - Immediate updates via work queue (no waiting for periodic sync)
 - **Robust Error Handling** - Retry logic with exponential backoff, preserves data on permission errors
@@ -163,6 +164,7 @@ kubectl get secretproviderclass <name> -o jsonpath='{.metadata.annotations.azure
 - ✅ Phase 2: Token acquisition (K8s + Azure AD via Workload Identity)
 - ✅ Phase 3: Azure Key Vault integration (secrets + certificates)
 - ✅ Phase 4: SecretProviderClass updates (objects + secretObjects)
+- ✅ Phase 6: Secret metadata synchronization (annotations, labels, CRD-based operation)
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation history.
 
@@ -223,6 +225,108 @@ Controller → Impersonates ServiceAccount
 - Rate limiting (max 5 concurrent reconciliations)
 - Retry logic (transient failures retry with backoff)
 - Graceful degradation (permission errors don't block other resources)
+
+### Two-Tier Reconciliation (Phase 6)
+
+Phase 6 introduces a two-tier architecture that enables annotation and label synchronization from Azure Key Vault to Kubernetes Secrets:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                 Two-Tier Reconciliation                       │
+├──────────────────────────────────────────────────────────────┤
+│  Tier 1: Controller Loop (Azure → Kubernetes)                │
+│  ┌────────────┐   ┌──────────────┐   ┌──────────────┐       │
+│  │ Azure Key  │──▶│ Controller   │──▶│ SPC with     │       │
+│  │ Vault Tags │   │ (15 min sync)│   │ Annotations  │       │
+│  └────────────┘   └──────────────┘   └──────────────┘       │
+│                                                               │
+│  Tier 2: Secret Watcher Loop (Kubernetes → Kubernetes)       │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐    │
+│  │ SPC with     │──▶│ Secret       │──▶│ Secrets with │    │
+│  │ Annotations  │   │ Watcher (30s)│   │ Metadata     │    │
+│  └──────────────┘   └──────────────┘   └──────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Tier 1 - Controller Loop:**
+- Polls Azure Key Vault (default: 15 minutes)
+- Transforms vault tags to SPC annotations
+- Makes Azure API calls (incurs cost)
+- Updates SecretProviderClass resources
+
+**Tier 2 - Secret Watcher Loop:**
+- Watches CSI-managed Secrets (30 seconds)
+- Extracts metadata from SPC annotations
+- Applies to Kubernetes Secrets
+- Pure Kubernetes operations (no Azure calls)
+
+**Cost Efficiency:**
+- Only Tier 1 makes Azure API calls
+- Tier 2 provides fast metadata propagation without Azure costs
+- Typical setup: ~$1.95/month for 12 vaults, 2 clusters
+
+**Architecture Benefits:**
+- **Reduced Azure costs:** Controller makes infrequent vault API calls
+- **Fast metadata updates:** Secret Watcher runs every 30 seconds
+- **Resilient to Azure outages:** Secret Watcher continues working
+- **SPC as cache:** SecretProviderClass stores vault metadata
+
+### Metadata Synchronization
+
+Synchronize annotations and labels from Azure Key Vault tags to Kubernetes Secrets:
+
+**Vault Tag Prefixes:**
+- `k8s-annotation.*` - Creates Secret annotations
+- `k8s-label.*` - Creates Secret labels
+
+**Example - Kubernetes Reflector Integration:**
+```bash
+# Tag a vault secret for cross-namespace replication
+az keyvault secret set-attribute \
+  --vault-name your-vault \
+  --name shared-secret \
+  --tags \
+    "secret-object=true" \
+    "k8s-annotation.reflector.v1.k8s.emberstack.com/reflection-allowed=true" \
+    "k8s-annotation.reflector.v1.k8s.emberstack.com/reflection-auto-enabled=true" \
+    "k8s-annotation.reflector.v1.k8s.emberstack.com/reflection-auto-namespaces=app-*"
+```
+
+**Result:** Secret created with Reflector annotations for automatic replication.
+
+**Example - Custom Labels:**
+```bash
+# Add labels for service mesh or monitoring
+az keyvault secret set-attribute \
+  --vault-name your-vault \
+  --name api-key \
+  --tags \
+    "secret-object=true" \
+    "k8s-label.app=myapp" \
+    "k8s-label.team=platform" \
+    "k8s-label.cost-center=engineering"
+```
+
+**Safe Metadata Removal:**
+- Tracking annotations record managed metadata
+- When vault tags deleted, metadata automatically removed from Secrets
+- User-added and system labels/annotations preserved
+- No manual cleanup required
+
+**Transformation Flow:**
+```
+Azure Vault Tag:
+  k8s-annotation.owner = "platform-team"
+
+SPC Annotation:
+  secret-metadata.azure-keyvault-sync.io/api-key.owner: "platform-team"
+
+Kubernetes Secret:
+  annotations:
+    owner: "platform-team"
+```
+
+For complete metadata sync documentation, see [TESTING.md](TESTING.md#testing-secret-metadata-sync-phase-6).
 
 ## Usage
 
