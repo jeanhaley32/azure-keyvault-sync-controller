@@ -23,7 +23,7 @@ import (
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
@@ -106,14 +106,15 @@ func main() {
 	// Disable manager metrics by setting bind address to "0" (we have our own metrics server)
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
-		Metrics: server.Options{
-			BindAddress: "0",
+		Metrics: metricsserver.Options{
+			BindAddress: cfg.MetricsBindAddress,
 		},
 	})
 	if err != nil {
 		slog.Error("Error creating controller-runtime manager", "error", err)
 		os.Exit(1)
 	}
+	slog.Info("Controller-runtime metrics server configured", "address", cfg.MetricsBindAddress)
 
 	// Read watch namespace from environment (empty = cluster-wide for backward compatibility)
 	watchNamespace := os.Getenv("WATCH_NAMESPACE")

@@ -25,6 +25,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 0.8, cfg.TokenRenewalThreshold)
 	assert.Equal(t, 0.8, cfg.AzureTokenRenewalThreshold)
 	assert.Equal(t, 8080, cfg.HealthCheckPort)
+	assert.Equal(t, ":9090", cfg.MetricsBindAddress)
 	assert.Equal(t, float32(10.0), cfg.KubernetesQPS)
 	assert.Equal(t, 20, cfg.KubernetesBurst)
 	assert.Equal(t, 5, cfg.AzureCircuitBreakerThreshold)
@@ -45,6 +46,7 @@ func TestLoadConfig_CustomValues(t *testing.T) {
     _ = os.Setenv("TOKEN_RENEWAL_THRESHOLD", "0.9")
     _ = os.Setenv("AZURE_TOKEN_RENEWAL_THRESHOLD", "0.85")
     _ = os.Setenv("HEALTH_CHECK_PORT", "9090")
+    _ = os.Setenv("METRICS_BIND_ADDRESS", ":8081")
     _ = os.Setenv("KUBERNETES_QPS", "20.0")
     _ = os.Setenv("KUBERNETES_BURST", "50")
     _ = os.Setenv("AZURE_CIRCUIT_BREAKER_THRESHOLD", "7")
@@ -65,6 +67,7 @@ func TestLoadConfig_CustomValues(t *testing.T) {
 	assert.Equal(t, 0.9, cfg.TokenRenewalThreshold)
 	assert.Equal(t, 0.85, cfg.AzureTokenRenewalThreshold)
 	assert.Equal(t, 9090, cfg.HealthCheckPort)
+	assert.Equal(t, ":8081", cfg.MetricsBindAddress)
 	assert.Equal(t, float32(20.0), cfg.KubernetesQPS)
 	assert.Equal(t, 50, cfg.KubernetesBurst)
 	assert.Equal(t, 7, cfg.AzureCircuitBreakerThreshold)
@@ -92,22 +95,8 @@ func TestValidate_LogLevel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				LogLevel:                     tt.logLevel,
-				LogFormat:                    "text",
-				SyncInterval:                 5 * time.Minute,
-				WorkerCount:                  5,
-				TokenExpirationSeconds:       3600,
-				TokenRenewalThreshold:        0.8,
-				AzureTokenRenewalThreshold:   0.8,
-				HealthCheckPort:              8080,
-				KubernetesQPS:                10.0,
-				KubernetesBurst:              20,
-				AzureCircuitBreakerThreshold: 5,
-				AzureCircuitBreakerTimeout:   1 * time.Minute,
-				TokenAudience:                "api://AzureADTokenExchange",
-				KeyVaultScope:                "https://vault.azure.net/.default",
-			}
+			cfg := getValidConfig()
+			cfg.LogLevel = tt.logLevel
 
 			err := cfg.Validate()
 			if tt.expectError {
@@ -329,6 +318,35 @@ func TestValidate_HealthCheckPort(t *testing.T) {
 	}
 }
 
+func TestValidate_MetricsBindAddress(t *testing.T) {
+	tests := []struct {
+		name        string
+		address     string
+		expectError bool
+	}{
+		{"valid :9090", ":9090", false},
+		{"valid :8080", ":8080", false},
+		{"valid 0.0.0.0:9090", "0.0.0.0:9090", false},
+		{"valid localhost:9090", "localhost:9090", false},
+		{"empty", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := getValidConfig()
+			cfg.MetricsBindAddress = tt.address
+
+			err := cfg.Validate()
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "METRICS_BIND_ADDRESS")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidate_KubernetesQPS(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -540,6 +558,7 @@ func getValidConfig() *Config {
 		TokenRenewalThreshold:        0.8,
 		AzureTokenRenewalThreshold:   0.8,
 		HealthCheckPort:              8080,
+		MetricsBindAddress:           ":9090",
 		KubernetesQPS:                10.0,
 		KubernetesBurst:              20,
 		AzureCircuitBreakerThreshold: 5,
@@ -553,7 +572,7 @@ func clearEnv() {
 	envVars := []string{
 		"LOG_LEVEL", "LOG_FORMAT", "SYNC_INTERVAL", "WORKER_COUNT",
 		"TOKEN_EXPIRATION_SECONDS", "TOKEN_RENEWAL_THRESHOLD",
-		"AZURE_TOKEN_RENEWAL_THRESHOLD", "HEALTH_CHECK_PORT",
+		"AZURE_TOKEN_RENEWAL_THRESHOLD", "HEALTH_CHECK_PORT", "METRICS_BIND_ADDRESS",
 		"KUBERNETES_QPS", "KUBERNETES_BURST",
 		"AZURE_CIRCUIT_BREAKER_THRESHOLD", "AZURE_CIRCUIT_BREAKER_TIMEOUT",
 		"TOKEN_AUDIENCE", "KEYVAULT_SCOPE",
