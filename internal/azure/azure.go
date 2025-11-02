@@ -1,11 +1,9 @@
 package azure
 
 import (
-	"log/slog"
 	"context"
 	"fmt"
-	
-	"os"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -124,7 +122,7 @@ func (ac *AzureTokenCache) IsTokenValid(namespace, serviceAccount string) bool {
 	return remainingLifetime > renewalThresholdDuration
 }
 
-// exchangeToken exchanges a Kubernetes JWT for an Azure AD access token
+// exchangeToken exchanges a Kubernetes JWT for an Azure AD access token using in-memory credentials
 func (ac *AzureTokenCache) exchangeToken(
 	ctx context.Context,
 	k8sToken string,
@@ -133,56 +131,20 @@ func (ac *AzureTokenCache) exchangeToken(
 ) (string, time.Time, error) {
 	slog.Debug("Exchanging Kubernetes token for Azure AD token")
 
-	// Write K8s token to temporary file
-	tmpFile, err := os.CreateTemp("", "k8s-token-*.jwt")
+	// Create a callback function that returns the K8s token
+	// This avoids writing the token to disk entirely
+	getAssertion := func(ctx context.Context) (string, error) {
+		return k8sToken, nil
+	}
+
+	// Create ClientAssertionCredential with in-memory token callback
+	// This is more secure than WorkloadIdentityCredential which requires writing to filesystem
+	cred, err := azidentity.NewClientAssertionCredential(tenantID, clientID, getAssertion, nil)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to create temporary token file: %w", err)
-	}
-    tmpFilePath := tmpFile.Name()
-    // Best-effort cleanup of the temporary file; ignore removal errors
-    defer func() { _ = os.Remove(tmpFilePath) }()
-
-	// Set restrictive permissions (owner read/write only)
-    if err := tmpFile.Chmod(0600); err != nil {
-        if cerr := tmpFile.Close(); cerr != nil {
-            slog.Debug("error closing temp token file after chmod failure", "error", cerr)
-        }
-		return "", time.Time{}, fmt.Errorf("failed to set token file permissions: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to create ClientAssertionCredential: %w", err)
 	}
 
-	// Write K8s token to file
-    if _, err := tmpFile.WriteString(k8sToken); err != nil {
-        if cerr := tmpFile.Close(); cerr != nil {
-            slog.Debug("error closing temp token file after write failure", "error", cerr)
-        }
-		return "", time.Time{}, fmt.Errorf("failed to write token to file: %w", err)
-	}
-    if cerr := tmpFile.Close(); cerr != nil {
-        slog.Debug("error closing temp token file after successful write", "error", cerr)
-    }
-
-	slog.Debug("Created temporary token file", "path", tmpFilePath)
-
-	// Set environment variables for WorkloadIdentityCredential
-    if err := os.Setenv("AZURE_FEDERATED_TOKEN_FILE", tmpFilePath); err != nil {
-        return "", time.Time{}, fmt.Errorf("failed to set AZURE_FEDERATED_TOKEN_FILE: %w", err)
-    }
-    if err := os.Setenv("AZURE_CLIENT_ID", clientID); err != nil {
-        return "", time.Time{}, fmt.Errorf("failed to set AZURE_CLIENT_ID: %w", err)
-    }
-    if err := os.Setenv("AZURE_TENANT_ID", tenantID); err != nil {
-        return "", time.Time{}, fmt.Errorf("failed to set AZURE_TENANT_ID: %w", err)
-    }
-
-	slog.Debug("Set environment variables for Azure authentication")
-
-	// Create WorkloadIdentityCredential
-	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to create WorkloadIdentityCredential: %w", err)
-	}
-
-	slog.Debug("Created WorkloadIdentityCredential")
+	slog.Debug("Created ClientAssertionCredential with in-memory token")
 
 	// Request Azure AD token with Key Vault scope
 	tokenResponse, err := cred.GetToken(ctx, policy.TokenRequestOptions{
