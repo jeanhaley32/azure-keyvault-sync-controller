@@ -33,9 +33,8 @@ const (
 	maxRetries = 5 // Maximum retry attempts before dropping
 
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
-	annotationRespectTags    = "azure-keyvault-sync/respect-tags"
 
-	// Label keys for tag filtering
+	// Label keys for service/environment filtering (multi-tenant vaults)
 	labelService     = "service"
 	labelEnvironment = "environment"
 )
@@ -332,91 +331,100 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Found certificates in vault",
 		"count", len(vaultCertificates), "vault", keyvaultName, "namespace", namespace, "name", name)
 
-	// Apply tag filtering if enabled
-	annotations := obj.Annotations
-	respectTags := annotations != nil && annotations[annotationRespectTags] == "true"
+	// Mandatory tag-based filtering (opinionated controller philosophy)
+	// Extract service and environment labels for multi-tenant filtering
+	labels := obj.Labels
+	serviceLabel := ""
+	environmentLabel := ""
+	if labels != nil {
+		serviceLabel = labels[labelService]
+		environmentLabel = labels[labelEnvironment]
+	}
+
+	// Create filter config for service/environment matching
+	filterConfig := azure.TagFilterConfig{
+		RespectTags:      true, // Always respect tags
+		ServiceLabel:     serviceLabel,
+		EnvironmentLabel: environmentLabel,
+	}
 
 	var secrets []string
 	var certificates []string
 
-	if respectTags {
-		// Extract service and environment labels
-		labels := obj.Labels
-		serviceLabel := ""
-		environmentLabel := ""
-		if labels != nil {
-			serviceLabel = labels[labelService]
-			environmentLabel = labels[labelEnvironment]
+	slog.Info("Applying mandatory tag-based filtering",
+		"namespace", namespace, "name", name,
+		"serviceLabel", serviceLabel, "environmentLabel", environmentLabel)
+
+	// Filter secrets: Must have sync opt-in AND match service/environment (if specified)
+	var syncedSecrets, noSyncTag, serviceEnvRejected int
+	for _, vaultSecret := range vaultSecrets {
+		// Step 1: Check sync opt-in (sync=true OR secret-object=true)
+		if !update.ShouldSyncSecret(vaultSecret.Tags) {
+			noSyncTag++
+			slog.Debug("Secret rejected - no sync opt-in tag",
+				"secret", vaultSecret.Name,
+				"namespace", namespace,
+				"name", name)
+			continue
 		}
 
-		slog.Info("Tag filtering enabled",
-			"namespace", namespace, "name", name,
-			"serviceLabel", serviceLabel, "environmentLabel", environmentLabel)
-
-		// Create filter config
-		filterConfig := azure.TagFilterConfig{
-			RespectTags:      true,
-			ServiceLabel:     serviceLabel,
-			EnvironmentLabel: environmentLabel,
-		}
-
-		// Filter secrets
-		var rejectedSecrets int
-		for _, vaultSecret := range vaultSecrets {
-			result := azure.MatchesTags(vaultSecret.Tags, filterConfig)
-			if result.Include {
-				secrets = append(secrets, vaultSecret.Name)
-				slog.Debug("Secret included", "name", vaultSecret.Name, "tags", vaultSecret.Tags)
-			} else {
-				rejectedSecrets++
-				slog.Info("Secret rejected by tag filter",
-					"secret", vaultSecret.Name,
-					"vault", keyvaultName,
-					"namespace", namespace,
-					"name", name,
-					"reason", result.Reason,
-					"vaultTags", vaultSecret.Tags,
-					"spcService", serviceLabel,
-					"spcEnvironment", environmentLabel)
-			}
-		}
-
-		// Filter certificates
-		var rejectedCerts int
-		for _, vaultCert := range vaultCertificates {
-			result := azure.MatchesTags(vaultCert.Tags, filterConfig)
-			if result.Include {
-				certificates = append(certificates, vaultCert.Name)
-				slog.Debug("Certificate included", "name", vaultCert.Name, "tags", vaultCert.Tags)
-			} else {
-				rejectedCerts++
-				slog.Info("Certificate rejected by tag filter",
-					"certificate", vaultCert.Name,
-					"vault", keyvaultName,
-					"namespace", namespace,
-					"name", name,
-					"reason", result.Reason,
-					"vaultTags", vaultCert.Tags,
-					"spcService", serviceLabel,
-					"spcEnvironment", environmentLabel)
-			}
-		}
-
-		slog.Info("Tag filtering complete",
-			"namespace", namespace, "name", name,
-			"secretsIncluded", len(secrets), "secretsRejected", rejectedSecrets,
-			"certsIncluded", len(certificates), "certsRejected", rejectedCerts)
-	} else {
-		// Tag filtering disabled - include all secrets and certificates
-		for _, vaultSecret := range vaultSecrets {
+		// Step 2: Check service/environment matching (if labels specified)
+		result := azure.MatchesTags(vaultSecret.Tags, filterConfig)
+		if result.Include {
 			secrets = append(secrets, vaultSecret.Name)
+			syncedSecrets++
+			slog.Debug("Secret included", "name", vaultSecret.Name, "tags", vaultSecret.Tags)
+		} else {
+			serviceEnvRejected++
+			slog.Info("Secret rejected by service/environment filter",
+				"secret", vaultSecret.Name,
+				"vault", keyvaultName,
+				"namespace", namespace,
+				"name", name,
+				"reason", result.Reason,
+				"vaultTags", vaultSecret.Tags,
+				"spcService", serviceLabel,
+				"spcEnvironment", environmentLabel)
 		}
-		for _, vaultCert := range vaultCertificates {
-			certificates = append(certificates, vaultCert.Name)
+	}
+
+	// Filter certificates: Must have sync opt-in AND match service/environment (if specified)
+	var syncedCerts, noCertSyncTag, certServiceEnvRejected int
+	for _, vaultCert := range vaultCertificates {
+		// Step 1: Check sync opt-in (sync=true OR cert-object=true)
+		if !update.ShouldSyncCert(vaultCert.Tags) {
+			noCertSyncTag++
+			slog.Debug("Certificate rejected - no sync opt-in tag",
+				"certificate", vaultCert.Name,
+				"namespace", namespace,
+				"name", name)
+			continue
 		}
 
-		slog.Debug("Tag filtering disabled, including all secrets and certificates")
+		// Step 2: Check service/environment matching (if labels specified)
+		result := azure.MatchesTags(vaultCert.Tags, filterConfig)
+		if result.Include {
+			certificates = append(certificates, vaultCert.Name)
+			syncedCerts++
+			slog.Debug("Certificate included", "name", vaultCert.Name, "tags", vaultCert.Tags)
+		} else {
+			certServiceEnvRejected++
+			slog.Info("Certificate rejected by service/environment filter",
+				"certificate", vaultCert.Name,
+				"vault", keyvaultName,
+				"namespace", namespace,
+				"name", name,
+				"reason", result.Reason,
+				"vaultTags", vaultCert.Tags,
+				"spcService", serviceLabel,
+				"spcEnvironment", environmentLabel)
+		}
 	}
+
+	slog.Info("Tag-based filtering complete",
+		"namespace", namespace, "name", name,
+		"secretsSynced", syncedSecrets, "secretsNoSyncTag", noSyncTag, "secretsServiceEnvRejected", serviceEnvRejected,
+		"certsSynced", syncedCerts, "certsNoSyncTag", noCertSyncTag, "certsServiceEnvRejected", certServiceEnvRejected)
 
 	slog.Info("Secrets to sync", "count", len(secrets), "vault", keyvaultName, "namespace", namespace, "name", name)
 	for _, secret := range secrets {
@@ -791,31 +799,46 @@ func (ctrl *Controller) watchAzureKeyVaultSync(ctx context.Context) {
 func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []azure.VaultSecret) *secretsstorev1.SecretProviderClass {
 	// Build array of secret objects for the SPC
 	var objects []map[string]interface{}
-	secretObjectCount := 0
+
+	// Build secretsWithTags for secretObjects generation
+	var secretsWithTags []update.VaultSecretWithTags
+
+	// Track sync statistics
+	syncedCount := 0
+	skippedCount := 0
 
 	for _, secret := range secrets {
-		// Check if this secret has the secret-object tag
-		hasSecretObjectTag := false
-		if secret.Tags != nil {
-			if tagValue, exists := secret.Tags["secret-object"]; exists && tagValue != nil && *tagValue == "true" {
-				hasSecretObjectTag = true
-				secretObjectCount++
-			}
+		// Check if secret should be synced (has sync=true OR secret-object=true tag)
+		if !update.ShouldSyncSecret(secret.Tags) {
+			skippedCount++
+			slog.Debug("Secret skipped - no sync opt-in tag",
+				"secret", secret.Name,
+				"namespace", akv.Namespace,
+				"name", akv.Name)
+			continue
 		}
 
-		// Create the object entry
+		syncedCount++
+
+		// Create the object entry for parameters
 		obj := map[string]interface{}{
 			"objectName": secret.Name,
 			"objectType": "secret",
 		}
-
-		// Add secretObject configuration if the tag is present
-		if hasSecretObjectTag {
-			obj["objectAlias"] = secret.Name
-		}
-
 		objects = append(objects, obj)
+
+		// Keep secret with tags for secretObjects generation
+		secretsWithTags = append(secretsWithTags, update.VaultSecretWithTags{
+			Name: secret.Name,
+			Tags: secret.Tags,
+		})
 	}
+
+	slog.Info("Filtered secrets by sync tag for CRD-based SPC",
+		"namespace", akv.Namespace,
+		"name", akv.Name,
+		"syncedCount", syncedCount,
+		"skippedCount", skippedCount)
 
 	// Build parameters map
 	parameters := map[string]string{
@@ -854,6 +877,17 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 		spc.Spec.Parameters["objects"] = buildObjectsArrayString(objects)
 	}
 
+	// Generate secretObjects based on vault tags (secret-object=true)
+	// No certificates in CRD mode, so pass empty slice for certs
+	generatedSecretObjects := update.GenerateSecretObjectsFromVault(secretsWithTags, nil)
+	if len(generatedSecretObjects) > 0 {
+		spc.Spec.SecretObjects = generatedSecretObjects
+		slog.Info("Generated secretObjects for CRD-based SPC",
+			"namespace", akv.Namespace,
+			"name", akv.Name,
+			"secretObjectCount", len(generatedSecretObjects))
+	}
+
 	return spc
 }
 
@@ -870,6 +904,52 @@ func buildObjectsArrayString(objects []map[string]interface{}) string {
 		}
 	}
 	return result
+}
+
+// compareSecretObjects compares two SecretObject slices for equality
+func compareSecretObjects(existing, desired []*secretsstorev1.SecretObject) bool {
+	if len(existing) != len(desired) {
+		return false
+	}
+
+	// Build maps for comparison
+	existingMap := make(map[string]*secretsstorev1.SecretObject)
+	for _, obj := range existing {
+		existingMap[obj.SecretName] = obj
+	}
+
+	// Check each desired object exists and matches
+	for _, desiredObj := range desired {
+		existingObj, exists := existingMap[desiredObj.SecretName]
+		if !exists {
+			return false
+		}
+
+		// Compare type
+		if existingObj.Type != desiredObj.Type {
+			return false
+		}
+
+		// Compare data array length
+		if len(existingObj.Data) != len(desiredObj.Data) {
+			return false
+		}
+
+		// Build map of existing data for comparison
+		existingData := make(map[string]string)
+		for _, data := range existingObj.Data {
+			existingData[data.Key] = data.ObjectName
+		}
+
+		// Check each desired data entry matches
+		for _, data := range desiredObj.Data {
+			if objectName, exists := existingData[data.Key]; !exists || objectName != data.ObjectName {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // boolPtr returns a pointer to a bool value
@@ -976,27 +1056,38 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 			return fmt.Errorf("failed to get SecretProviderClass: %w", err)
 		}
 	} else {
-		// SPC exists, update it
-		slog.Info("Updating SecretProviderClass",
-			"namespace", namespace,
-			"name", name)
+		// SPC exists, check if update is needed
+		objectsChanged := existingSPC.Spec.Parameters["objects"] != desiredSPC.Spec.Parameters["objects"]
+		secretObjectsChanged := !compareSecretObjects(existingSPC.Spec.SecretObjects, desiredSPC.Spec.SecretObjects)
 
-		// Update the spec
-		existingSPC.Spec = desiredSPC.Spec
-		existingSPC.OwnerReferences = desiredSPC.OwnerReferences
+		if !objectsChanged && !secretObjectsChanged {
+			slog.Info("No changes detected - skipping SPC update",
+				"namespace", namespace,
+				"name", name)
+		} else {
+			slog.Info("Changes detected - updating SecretProviderClass",
+				"namespace", namespace,
+				"name", name,
+				"objectsChanged", objectsChanged,
+				"secretObjectsChanged", secretObjectsChanged)
 
-		_, updateErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Update(
-			ctx,
-			existingSPC,
-			metav1.UpdateOptions{},
-		)
-		if updateErr != nil {
-			return fmt.Errorf("failed to update SecretProviderClass: %w", updateErr)
+			// Update the spec
+			existingSPC.Spec = desiredSPC.Spec
+			existingSPC.OwnerReferences = desiredSPC.OwnerReferences
+
+			_, updateErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Update(
+				ctx,
+				existingSPC,
+				metav1.UpdateOptions{},
+			)
+			if updateErr != nil {
+				return fmt.Errorf("failed to update SecretProviderClass: %w", updateErr)
+			}
+
+			slog.Info("SecretProviderClass updated successfully",
+				"namespace", namespace,
+				"name", name)
 		}
-
-		slog.Info("SecretProviderClass updated successfully",
-			"namespace", namespace,
-			"name", name)
 	}
 
 	// Step 7: Update AzureKeyVaultSync status

@@ -42,8 +42,8 @@ func (m *MockVaultClient) ListSecrets(ctx context.Context, vaultName, token stri
 		return m.ListSecretsFunc(ctx, vaultName, token, expiration)
 	}
 	return []azure.VaultSecret{
-		{Name: "mock-secret-1", Tags: map[string]*string{}},
-		{Name: "mock-secret-2", Tags: map[string]*string{}},
+		{Name: "mock-secret-1", Tags: map[string]*string{"sync": ptr("true")}},
+		{Name: "mock-secret-2", Tags: map[string]*string{"sync": ptr("true")}},
 	}, nil
 }
 
@@ -53,7 +53,7 @@ func (m *MockVaultClient) ListCertificates(ctx context.Context, vaultName, token
 		return m.ListCertificatesFunc(ctx, vaultName, token, expiration)
 	}
 	return []azure.VaultCertificate{
-		{Name: "mock-cert-1", Tags: map[string]*string{}},
+		{Name: "mock-cert-1", Tags: map[string]*string{"sync": ptr("true")}},
 	}, nil
 }
 

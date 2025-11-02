@@ -167,7 +167,7 @@ func TestReconcileResource_ListCertificatesError(t *testing.T) {
 	ctrl.vaultClient = &MockVaultClient{
 		ListSecretsFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultSecret, error) {
 			return []azure.VaultSecret{
-				{Name: "secret1", Tags: map[string]*string{}},
+				{Name: "secret1", Tags: map[string]*string{"sync": ptr("true")}},
 			}, nil
 		},
 		ListCertificatesFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultCertificate, error) {
@@ -250,8 +250,7 @@ func TestReconcileResource_TagFiltering(t *testing.T) {
 	spc := createValidSPC()
 	spc.Spec.Parameters["objects"] = "" // Force change
 
-	// Enable tag filtering
-	spc.Annotations[annotationRespectTags] = "true"
+	// Set service/environment labels for multi-tenant filtering
 	spc.Labels = map[string]string{
 		labelService:     "api",
 		labelEnvironment: "production",
@@ -259,18 +258,18 @@ func TestReconcileResource_TagFiltering(t *testing.T) {
 
 	ctrl := createTestController()
 
-	// Mock vault with tagged secrets
+	// Mock vault with tagged secrets (all have sync opt-in + service/environment tags)
 	ctrl.vaultClient = &MockVaultClient{
 		ListSecretsFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultSecret, error) {
 			return []azure.VaultSecret{
-				{Name: "secret-api-prod", Tags: map[string]*string{"service": ptr("api"), "environment": ptr("production")}},
-				{Name: "secret-api-dev", Tags: map[string]*string{"service": ptr("api"), "environment": ptr("development")}},
-				{Name: "secret-other", Tags: map[string]*string{"service": ptr("other"), "environment": ptr("production")}},
+				{Name: "secret-api-prod", Tags: map[string]*string{"sync": ptr("true"), "service": ptr("api"), "environment": ptr("production")}},
+				{Name: "secret-api-dev", Tags: map[string]*string{"sync": ptr("true"), "service": ptr("api"), "environment": ptr("development")}},
+				{Name: "secret-other", Tags: map[string]*string{"sync": ptr("true"), "service": ptr("other"), "environment": ptr("production")}},
 			}, nil
 		},
 		ListCertificatesFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultCertificate, error) {
 			return []azure.VaultCertificate{
-				{Name: "cert-api-prod", Tags: map[string]*string{"service": ptr("api"), "environment": ptr("production")}},
+				{Name: "cert-api-prod", Tags: map[string]*string{"sync": ptr("true"), "service": ptr("api"), "environment": ptr("production")}},
 			}, nil
 		},
 	}
@@ -305,7 +304,7 @@ func TestReconcileResource_SecretObjectGeneration(t *testing.T) {
 		ListSecretsFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultSecret, error) {
 			return []azure.VaultSecret{
 				{Name: "secret-with-k8s", Tags: map[string]*string{"secret-object": ptr("true")}},
-				{Name: "secret-without-k8s", Tags: map[string]*string{}},
+				{Name: "secret-without-k8s", Tags: map[string]*string{"sync": ptr("true")}}, // Has sync but not secret-object
 			}, nil
 		},
 		ListCertificatesFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultCertificate, error) {

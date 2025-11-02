@@ -1,0 +1,114 @@
+---
+# AzureKeyVaultSync CRD equivalent for the Flow SPC example
+# This replaces the manual SecretProviderClass with a declarative CRD resource
+# The controller will automatically generate and manage the SPC
+#
+# IMPORTANT: Azure Key Vault secrets/certificates MUST have tags for sync opt-in:
+#   - sync: "true"           - Required: Opt-in to sync this secret/cert to Kubernetes
+#   - secret-object: "true"  - Optional: Also create K8s Secret resource (implies sync)
+#   - cert-object: "true"    - Optional: Also create K8s TLS Secret (implies sync)
+#   - service: "app-name"    - Optional: For multi-tenant vault filtering
+#   - environment: "prod"    - Optional: For multi-tenant vault filtering
+#
+# Example Azure CLI commands to tag vault secrets:
+#   az keyvault secret set-attributes --vault-name example-vault --name my-secret --tags sync=true
+#   az keyvault secret set-attributes --vault-name example-vault --name db-password --tags sync=true secret-object=true
+
+apiVersion: azure-keyvault-sync.io/v1alpha1
+kind: AzureKeyVaultSync
+metadata:
+  name: example-full
+  namespace: default
+spec:
+  # Azure Key Vault name (without .vault.azure.net suffix)
+  keyvaultName: example-vault
+
+  # Azure AD Tenant ID where the Managed Identity exists
+  tenantId: "11111111-1111-1111-1111-111111111111"
+
+  # Client ID of the Azure User-Assigned Managed Identity
+  # This identity must have:
+  # - Key Vault Secrets User role on the vault
+  # - Key Vault Certificates User role on the vault
+  clientID: "00000000-0000-0000-0000-000000000000"
+
+  # Kubernetes ServiceAccount with azure.workload.identity/client-id annotation
+  # This replaces the azure-keyvault-sync/service-account annotation in SPC
+  serviceAccount: example-app
+
+  # Optional: Multi-tenant vault filtering
+  # When specified, only secrets/certs matching BOTH service AND environment tags are synced
+  # When omitted, all secrets with sync: "true" tag are synced (single-tenant mode)
+  # Uncomment and set values to enable multi-tenant filtering:
+  # filters:
+  #   service: "example-app"      # Matches vault tag: service=example-app
+  #   environment: "production"   # Matches vault tag: environment=production
+
+  # Optional: What happens to the generated SPC when this resource is deleted
+  # - Cascade (default): SecretProviderClass is deleted
+  # - Orphan: SecretProviderClass remains
+  deletePolicy: Cascade
+
+---
+# ServiceAccount remains the same as in annotation mode
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: example-app
+  namespace: default
+  annotations:
+    # Azure Workload Identity annotation - links to Azure Managed Identity
+    azure.workload.identity/client-id: "00000000-0000-0000-0000-000000000000"
+
+---
+# Example Pod using the auto-generated SecretProviderClass
+# The SPC name will match the AzureKeyVaultSync name: "example-full"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-app
+  namespace: default
+  labels:
+    # Required for Azure Workload Identity injection
+    azure.workload.identity/use: "true"
+spec:
+  serviceAccountName: example-app
+  containers:
+    - name: app
+      image: nginx:alpine
+      volumeMounts:
+        - name: secrets-store
+          mountPath: "/mnt/secrets"
+          readOnly: true
+      env:
+        # Example: Use secret from Kubernetes Secret (if vault secret has secret-object=true tag)
+        - name: SECRET_VALUE
+          valueFrom:
+            secretKeyRef:
+              name: secret-name  # Matches vault secret name
+              key: secret-name
+  volumes:
+    - name: secrets-store
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          # Reference the SPC by the AzureKeyVaultSync name
+          secretProviderClass: "example-full"
+
+---
+# After applying the AzureKeyVaultSync, you can check the status:
+#
+# kubectl get azurekeyvaultsync example-full -o yaml
+#
+# Expected status:
+# status:
+#   secretCount: 10              # Number of secrets synced from vault
+#   secretObjectCount: 3         # Number with secret-object: "true" tag
+#   generatedSPCName: example-full
+#   lastSyncTime: "2025-11-01T12:00:00Z"
+#   observedGeneration: 1
+#   conditions:
+#   - type: Ready
+#     status: "True"
+#     lastTransitionTime: "2025-11-01T12:00:00Z"

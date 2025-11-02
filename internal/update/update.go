@@ -297,6 +297,20 @@ func hasTag(tags map[string]*string, key string) bool {
 	return *value == "true"
 }
 
+// ShouldSyncSecret determines if a secret should be synced to Kubernetes
+// Returns true if the secret has sync=true OR secret-object=true tag
+// secret-object=true implies sync=true (if you want a K8s Secret, you need it synced)
+func ShouldSyncSecret(tags map[string]*string) bool {
+	return hasTag(tags, "sync") || hasTag(tags, "secret-object")
+}
+
+// ShouldSyncCert determines if a certificate should be synced to Kubernetes
+// Returns true if the cert has sync=true OR cert-object=true tag
+// cert-object=true implies sync=true (if you want a K8s Secret, you need it synced)
+func ShouldSyncCert(tags map[string]*string) bool {
+	return hasTag(tags, "sync") || hasTag(tags, "cert-object")
+}
+
 // GenerateSecretObjectsFromVault generates K8s Secret objects based on vault tags
 // Only secrets/certs with secret-object=true or cert-object=true tags are included
 // Vault tags are the source of truth - SPC annotations are no longer used

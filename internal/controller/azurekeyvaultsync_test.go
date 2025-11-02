@@ -177,18 +177,21 @@ func TestGenerateSecretProviderClass_SecretObjectTag(t *testing.T) {
 			Name: "normal-secret",
 			Tags: map[string]*string{
 				"service": stringPtr("api"),
+				"sync":    stringPtr("true"), // Must have sync opt-in
 			},
 		},
 		{
 			Name: "secret-with-object-tag",
 			Tags: map[string]*string{
 				"service":       stringPtr("api"),
-				"secret-object": stringPtr("true"),
+				"secret-object": stringPtr("true"), // secret-object implies sync
 			},
 		},
 		{
 			Name: "another-normal-secret",
-			Tags: nil,
+			Tags: map[string]*string{
+				"sync": stringPtr("true"), // Must have sync opt-in
+			},
 		},
 	}
 
@@ -198,7 +201,7 @@ func TestGenerateSecretProviderClass_SecretObjectTag(t *testing.T) {
 	assert.Contains(t, spc.Spec.Parameters, "objects")
 	assert.NotEmpty(t, spc.Spec.Parameters["objects"])
 
-	// Verify the objects array string contains all secrets
+	// Verify the objects array string contains all synced secrets (with sync opt-in)
 	objectsStr := spc.Spec.Parameters["objects"]
 	assert.Contains(t, objectsStr, "normal-secret")
 	assert.Contains(t, objectsStr, "secret-with-object-tag")

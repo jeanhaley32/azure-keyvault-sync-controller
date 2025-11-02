@@ -303,58 +303,111 @@ spec:
 | Annotation | Required | Description |
 |------------|----------|-------------|
 | `azure-keyvault-sync/service-account` | **Yes** | ServiceAccount name for impersonation. **Presence of this annotation enables automatic sync** (implicit opt-in) |
-| `azure-keyvault-sync/respect-tags` | No | Set to `"true"` to enable tag-based filtering (see Tag Filtering section) |
 | `azure-keyvault-sync/last-sync` | Auto | Timestamp of last successful sync (set by controller) |
 
-### Azure Key Vault Tags Reference
+### Azure Key Vault Tags Reference (Required)
+
+**⚠️ Breaking Change in v2.0:** All secrets/certificates must have explicit opt-in tags. See [MIGRATION.md](MIGRATION.md) for upgrade guide.
 
 | Tag | Values | Description |
 |-----|--------|-------------|
-| `service` | string | Required for tag filtering; matches against SPC `service` label |
-| `environment` | string | Optional for environment separation; matches against SPC `environment` label |
-| `secret-object` | `"true"` | Must be exactly `"true"` (lowercase) to generate a Kubernetes Secret (type: Opaque) |
-| `cert-object` | `"true"` | Must be exactly `"true"` (lowercase) to generate a Kubernetes Secret (type: kubernetes.io/tls) |
+| `sync` | `"true"` | **REQUIRED**: Opt-in to sync this secret/certificate to Kubernetes. Without this tag, the secret is ignored |
+| `secret-object` | `"true"` | Optional: Generate Kubernetes Secret (type: Opaque). **Implies `sync: "true"`** |
+| `cert-object` | `"true"` | Optional: Generate Kubernetes TLS Secret (type: kubernetes.io/tls). **Implies `sync: "true"`** |
+| `service` | string | Optional: For multi-tenant vaults; must match SPC `service` label |
+| `environment` | string | Optional: For environment-specific secrets; must match SPC `environment` label |
 
-### Tag Filtering
+### Tag Filtering & Sync Behavior
 
-Enable **tag-based filtering** to selectively sync secrets from shared vaults based on service and environment.
+**⚠️ Opinionated Philosophy:** Azure Key Vault tags are the single source of truth. The controller uses a two-level hierarchy:
 
-#### Basic Tag Filtering Setup
+```
+1. Sync Opt-In (REQUIRED):
+   sync: "true"              → Explicit opt-in to sync this secret
+   secret-object: "true"     → Implies sync + creates K8s Secret
+   cert-object: "true"       → Implies sync + creates K8s TLS Secret
 
-1. **Tag secrets in Azure Key Vault:**
-```bash
-# Tag a production web API secret
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name db-password \
-  --tags service=web-api environment=production
-
-# Tag a staging web API secret
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name db-password-staging \
-  --tags service=web-api environment=staging
-
-# Tag an environment-agnostic secret (no environment tag)
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name api-key \
-  --tags service=web-api
+2. Multi-Tenant Filtering (OPTIONAL):
+   service: "app-name"       → Filter by service (when SPC has service label)
+   environment: "prod"       → Filter by environment (when SPC has environment label)
 ```
 
-2. **Configure SecretProviderClass:**
+#### Single-Tenant Mode (Simple Vaults)
+
+For vaults used by a single application, only the sync opt-in is required:
+
+**Tag secrets in Azure:**
+```bash
+# Basic sync opt-in
+az keyvault secret set-attributes \
+  --vault-name my-app-vault \
+  --name database-password \
+  --tags sync=true
+
+# With K8s Secret generation
+az keyvault secret set-attributes \
+  --vault-name my-app-vault \
+  --name api-key \
+  --tags sync=true secret-object=true
+```
+
+**SecretProviderClass:**
 ```yaml
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: web-api-secrets
+  name: my-app
+  namespace: default
+  # No service/environment labels needed
+  annotations:
+    azure-keyvault-sync/service-account: "my-app"
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: "my-app-vault"
+    clientID: "00000000-0000-0000-0000-000000000000"
+    tenantId: "11111111-1111-1111-1111-111111111111"
+```
+
+**Result:** All secrets with `sync: "true"` (or secret-object/cert-object tags) are synced.
+
+#### Multi-Tenant Mode (Shared Vaults)
+
+For vaults shared by multiple services, add service/environment tags AND SPC labels:
+
+**Tag secrets in Azure:**
+```bash
+# Production web API secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name web-db-password \
+  --tags sync=true service=web-api environment=production
+
+# Staging web API secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name web-db-password-staging \
+  --tags sync=true service=web-api environment=staging
+
+# Environment-agnostic secret (no environment tag)
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name web-api-key \
+  --tags sync=true service=web-api
+```
+
+**SecretProviderClass:**
+```yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: web-api-prod
   namespace: production
   labels:
-    service: web-api          # Required when respect-tags enabled
-    environment: production    # Optional (allows env-agnostic secrets)
+    service: web-api          # Enables service filtering
+    environment: production    # Enables environment filtering
   annotations:
     azure-keyvault-sync/service-account: "web-api"
-    azure-keyvault-sync/respect-tags: "true"  # Enable tag filtering
 spec:
   provider: azure
   parameters:
@@ -364,52 +417,38 @@ spec:
 ```
 
 **Result:**
-- ✅ `db-password` - Included (service+env match)
-- ❌ `db-password-staging` - Rejected (env mismatch)
-- ✅ `api-key` - Included (service match, env-agnostic)
+- ✅ `web-db-password` - Synced (has sync tag + service/env match)
+- ❌ `web-db-password-staging` - Filtered out (env mismatch)
+- ✅ `web-api-key` - Synced (has sync tag + service match, env-agnostic)
 
-#### Tag Filtering Behavior
+#### Filtering Rules
 
-**Service Tag (Required):**
-- Vault secret MUST have `service` tag matching SPC `service` label
-- Secrets without `service` tag are REJECTED (strict mode)
-- Case-insensitive matching (`Web-API` matches `web-api`)
+**Level 1: Sync Opt-In (Always Enforced)**
+- Vault secret/cert MUST have `sync: "true"` OR `secret-object: "true"` OR `cert-object: "true"`
+- Without opt-in tag, secret is ignored regardless of other tags
 
-**Environment Tag (Optional):**
-- If vault secret has `environment` tag, it must match SPC `environment` label
-- Secrets without `environment` tag are treated as environment-agnostic (shared across all environments)
-- SPC can have `environment` label and still sync env-agnostic secrets
+**Level 2: Multi-Tenant Filtering (Conditional)**
+- Only applied when SPC has service/environment labels
+- If SPC has NO labels → all secrets with sync opt-in are included (single-tenant mode)
+- If SPC has service label → vault secrets must have matching service tag
+- If vault secret has environment tag → must match SPC environment label (if present)
+- Vault secrets without environment tag are treated as environment-agnostic
 
 **Examples:**
 
 | Vault Tags | SPC Labels | Result |
 |-------------|------------|--------|
-| `service: web-api` | `service: web-api` | ✅ Included |
-| `service: web-api, environment: prod` | `service: web-api, environment: prod` | ✅ Included |
-| `service: web-api, environment: prod` | `service: web-api, environment: staging` | ❌ Rejected (env mismatch) |
-| `service: web-api` | `service: web-api, environment: prod` | ✅ Included (env-agnostic) |
-| `service: mobile-api` | `service: web-api` | ❌ Rejected (service mismatch) |
-| No tags | `service: web-api` | ❌ Rejected (no service tag) |
-
-#### Combined Tag Filtering + Secret Generation
-
-Tag filtering runs FIRST, then secret-object evaluation. Only secrets that pass filtering are evaluated for Kubernetes Secret generation.
-
-```bash
-# This secret will be synced AND generated as K8s Secret
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name db-password \
-  --tags service=web-api environment=production secret-object=true
-
-# This secret is rejected by filtering, secret-object tag is NOT evaluated
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name mobile-secret \
-  --tags service=mobile-api secret-object=true
-```
+| `sync: true` | _(none)_ | ✅ Synced (single-tenant) |
+| `sync: true, service: web` | `service: web` | ✅ Synced |
+| `sync: true, service: web, env: prod` | `service: web, env: prod` | ✅ Synced |
+| `sync: true, service: web, env: prod` | `service: web, env: staging` | ❌ Filtered (env mismatch) |
+| `sync: true, service: web` | `service: web, env: prod` | ✅ Synced (env-agnostic) |
+| `secret-object: true, service: web` | `service: web` | ✅ Synced (secret-object implies sync) |
+| `service: web` | `service: web` | ❌ Filtered (no sync opt-in) |
+| _(no tags)_ | _(any)_ | ❌ Filtered (no sync opt-in) |
 
 **For complete tag filtering documentation, see:**
+- [MIGRATION.md](MIGRATION.md) - Upgrade guide for breaking changes
 - [Tag Filtering Decision Tree](docs/design/tag-filtering-decision-tree.md) - Comprehensive decision logic and scenarios
 - [examples/tag-filtering/](examples/tag-filtering/) - Working examples
 
