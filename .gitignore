@@ -16,6 +16,11 @@ go.work
 
 # Build output
 azure-keyvault-sync-controller
+bin/
+
+# Test output files
+test_output.txt
+coverage.html
 
 # IDE and editor files
 .vscode/
@@ -27,3 +32,7 @@ azure-keyvault-sync-controller
 # OS files
 .DS_Store
 /controller
+
+# Local session state and internal documentation
+.session-state.md
+docs/sessions/

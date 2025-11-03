@@ -1,5 +1,100 @@
 # Development Log
 
+## 2025-11-02
+
+### Phase 6: Secret Metadata Synchronization - ✅ COMPLETE
+**Branch:** `feature/phase-6-secret-annotation-sync`
+**PR:** #43 → `staging`
+
+Implemented comprehensive metadata synchronization enabling annotations and labels to flow from Azure Key Vault tags to Kubernetes Secrets through a two-tier reconciliation architecture.
+
+**New Features:**
+
+**1. CRD-Based Architecture:**
+- AzureKeyVaultSync Custom Resource Definition for declarative vault management
+- Automatic SecretProviderClass generation and lifecycle management
+- Full RBAC configuration for CRD operations
+- Controller-runtime integration for CRD reconciliation
+
+**2. Two-Tier Reconciliation:**
+- Tier 1 (Controller Loop): Azure Key Vault → SecretProviderClass (default 15 min)
+- Tier 2 (Secret Watcher): SecretProviderClass → Secrets (30 second polling)
+- Only Tier 1 makes Azure API calls (cost-optimized)
+- SPC acts as cache/buffer between Azure and Kubernetes
+- Cost efficiency: ~$1.95/month for 12 vaults, 2 clusters
+
+**3. Annotation Synchronization:**
+- Vault tags with `k8s-annotation.*` prefix sync to Secret annotations
+- Storage format: `secret-metadata.azure-keyvault-sync.io/<secretName>.<key>` in SPC
+- Automatic extraction and application to Secrets
+- Integration with tools like Kubernetes Reflector
+
+**4. Label Synchronization:**
+- Vault tags with `k8s-label.*` prefix sync to Secret labels
+- JSON encoding for multiple labels per secret
+- Storage format: `secret-label.azure-keyvault-sync.io/<secretName>` in SPC
+- Automatic label extraction and application
+
+**5. Safe Metadata Removal:**
+- Tracking annotations record managed metadata:
+  - `azure-keyvault-sync.io/managed-labels` - Comma-separated label keys
+  - `azure-keyvault-sync.io/managed-annotations` - Annotation keys
+- Automatic cleanup when vault tags deleted
+- Protection for user-added and system labels/annotations
+- JSON Patch remove operations
+
+**6. Comprehensive Testing:**
+- Unit tests for annotation/label transformation (255 lines)
+- Secret metadata patching tests (585 lines)
+- CRD validation tests (510 lines)
+- Real-world Reflector integration testing
+- Label removal bug fix and verification
+
+**New Files:**
+- `api/v1alpha1/azurekeyvaultsync_types.go`: CRD types
+- `internal/azure/annotations.go`: Metadata transformation functions
+- `internal/controller/secret_annotations_test.go`: Comprehensive test suite
+- `deploy/crd/azure-keyvault-sync.io_azurekeyvaultsyncs.yaml`: CRD definition
+
+**Modified Files:**
+- `internal/controller/controller.go`: Added Secret Watcher loop and metadata reconciliation
+- `internal/azure/vault.go`: Enhanced to capture vault tags for metadata sync
+- `internal/update/patch.go`: Extended to support SPC annotations for metadata
+- `go.mod/go.sum`: Added controller-runtime v0.19.4
+
+**Bug Fixes:**
+- Fixed critical label removal bug (lines 1272-1275 in controller.go)
+- Early return prevented metadata removal when vault tags deleted
+- Removed buggy early return, kept proper check at line 1333
+
+**Architecture Benefits:**
+- Reduced Azure API costs (controller-only vault calls)
+- Fast metadata propagation (30-second Secret Watcher)
+- Resilient to Azure outages (Secret Watcher continues independently)
+- Vault tags as single source of truth for metadata
+
+**Testing Results:**
+- Successfully synced annotations from vault tags to Secrets
+- Label synchronization with JSON encoding verified
+- Safe removal of metadata confirmed (tracking annotations working)
+- Kubernetes Reflector integration validated
+- No update loops or race conditions
+- Token renewal and graceful shutdown fixes
+
+**Security:**
+- All Phase 6 operations maintain service account impersonation model
+- No additional Azure API permissions required
+- Tracking annotations prevent accidental metadata deletion
+- User and system metadata protection verified
+
+**Documentation:**
+- Updated ROADMAP.md with Phase 6 completion details
+- Updated TESTING.md with Phase 6 testing procedures
+- Updated README.md with two-tier architecture and metadata sync sections
+- Added comprehensive examples and transformation flow diagrams
+
+**Next:** Production monitoring and potential Phase 7 (advanced features)
+
 ## 2025-10-28
 
 ### Release v1.3.2: Critical Kubernetes Deployment Fix
@@ -428,12 +523,15 @@ Created complete deployment infrastructure for container image distribution and 
 
 ## Current Status
 
-**✅ Production Ready**
+**✅ Production Ready - Phase 6 Complete**
 
-All planned phases (1-4) complete with production-grade features:
+All planned phases (1-4, 6) complete with production-grade features:
 - Work queue architecture with retry logic
 - Automatic vault synchronization
 - Kubernetes Secret generation
+- **Metadata synchronization (Phase 6):** Annotations and labels from vault tags
+- **Two-tier reconciliation:** Cost-optimized Azure API usage
+- **CRD-based operation:** Declarative vault management
 - Comprehensive error handling
 - Container images available on GHCR
 - Complete documentation and examples

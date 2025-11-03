@@ -2,11 +2,14 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/cache"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/circuitbreaker"
@@ -14,13 +17,17 @@ import (
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/health"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/token"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/update"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -28,9 +35,8 @@ const (
 	maxRetries = 5 // Maximum retry attempts before dropping
 
 	annotationServiceAccount = "azure-keyvault-sync/service-account"
-	annotationRespectTags    = "azure-keyvault-sync/respect-tags"
 
-	// Label keys for tag filtering
+	// Label keys for service/environment filtering (multi-tenant vaults)
 	labelService     = "service"
 	labelEnvironment = "environment"
 )
@@ -73,6 +79,7 @@ func isValidForSync(obj *secretsstorev1.SecretProviderClass) (bool, string) {
 type Controller struct {
 	client              spcclient.Interface
 	clientset           kubernetes.Interface
+	ctrlClient          client.Client // Controller-runtime client for CRD access
 	cache               *cache.SecretProviderClassCache
 	tokenCache          *token.TokenCache
 	azureTokenCache     *azure.AzureTokenCache
@@ -88,7 +95,7 @@ type Controller struct {
 	patchClient   PatchClient
 }
 
-func NewController(client spcclient.Interface, clientset kubernetes.Interface, config *config.Config, watchNamespace string) *Controller {
+func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface, ctrlClient client.Client, config *config.Config, watchNamespace string) *Controller {
 	// Initialize circuit breaker for Azure API protection
 	azureCB := circuitbreaker.NewCircuitBreaker(
 		config.AzureCircuitBreakerThreshold,
@@ -106,11 +113,12 @@ func NewController(client spcclient.Interface, clientset kubernetes.Interface, c
 	// Create real implementations of interfaces
 	tokenProvider := NewRealTokenProvider(tokenCache, azureTokenCache)
 	vaultClient := NewRealVaultClient()
-	patchClient := NewRealPatchClient(client)
+	patchClient := NewRealPatchClient(spcClient)
 
 	return &Controller{
-		client:              client,
+		client:              spcClient,
 		clientset:           clientset,
+		ctrlClient:          ctrlClient,
 		cache:               cache.NewCache(),
 		tokenCache:          tokenCache,
 		azureTokenCache:     azureTokenCache,
@@ -241,10 +249,6 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Kubernetes token",
 		    "namespace", namespace, "serviceAccount", serviceAccount, "clientID", clientID)
 
-	// Debug: Print token snippet
-	tokenSnippet := fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
-	slog.Debug("Kubernetes token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", tokenSnippet)
-
 	// Extract tenantID
 	tenantID, ok := obj.Spec.Parameters["tenantId"]
 	if !ok {
@@ -266,10 +270,6 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 
 	slog.Info("Obtained Azure AD token",
 		    "namespace", namespace, "serviceAccount", serviceAccount)
-
-	// Debug: Print Azure token snippet
-	azureTokenSnippet := fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
-	slog.Debug("Azure AD token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", azureTokenSnippet)
 
 	// Extract vault name
 	keyvaultName, ok := obj.Spec.Parameters["keyvaultName"]
@@ -325,91 +325,99 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Found certificates in vault",
 		"count", len(vaultCertificates), "vault", keyvaultName, "namespace", namespace, "name", name)
 
-	// Apply tag filtering if enabled
-	annotations := obj.Annotations
-	respectTags := annotations != nil && annotations[annotationRespectTags] == "true"
+	// Mandatory tag-based filtering (opinionated controller philosophy)
+	// Extract service and environment labels for multi-tenant filtering
+	labels := obj.Labels
+	serviceLabel := ""
+	environmentLabel := ""
+	if labels != nil {
+		serviceLabel = labels[labelService]
+		environmentLabel = labels[labelEnvironment]
+	}
+
+	// Create filter config for service/environment matching
+	filterConfig := azure.TagFilterConfig{
+		ServiceLabel:     serviceLabel,
+		EnvironmentLabel: environmentLabel,
+	}
 
 	var secrets []string
 	var certificates []string
 
-	if respectTags {
-		// Extract service and environment labels
-		labels := obj.Labels
-		serviceLabel := ""
-		environmentLabel := ""
-		if labels != nil {
-			serviceLabel = labels[labelService]
-			environmentLabel = labels[labelEnvironment]
+	slog.Info("Applying mandatory tag-based filtering",
+		"namespace", namespace, "name", name,
+		"serviceLabel", serviceLabel, "environmentLabel", environmentLabel)
+
+	// Filter secrets: Must have sync opt-in AND match service/environment (if specified)
+	var syncedSecrets, noSyncTag, serviceEnvRejected int
+	for _, vaultSecret := range vaultSecrets {
+		// Step 1: Check sync opt-in (sync=true OR secret-object=true)
+		if !update.ShouldSyncSecret(vaultSecret.Tags) {
+			noSyncTag++
+			slog.Debug("Secret rejected - no sync opt-in tag",
+				"secret", vaultSecret.Name,
+				"namespace", namespace,
+				"name", name)
+			continue
 		}
 
-		slog.Info("Tag filtering enabled",
-			"namespace", namespace, "name", name,
-			"serviceLabel", serviceLabel, "environmentLabel", environmentLabel)
-
-		// Create filter config
-		filterConfig := azure.TagFilterConfig{
-			RespectTags:      true,
-			ServiceLabel:     serviceLabel,
-			EnvironmentLabel: environmentLabel,
-		}
-
-		// Filter secrets
-		var rejectedSecrets int
-		for _, vaultSecret := range vaultSecrets {
-			result := azure.MatchesTags(vaultSecret.Tags, filterConfig)
-			if result.Include {
-				secrets = append(secrets, vaultSecret.Name)
-				slog.Debug("Secret included", "name", vaultSecret.Name, "tags", vaultSecret.Tags)
-			} else {
-				rejectedSecrets++
-				slog.Info("Secret rejected by tag filter",
-					"secret", vaultSecret.Name,
-					"vault", keyvaultName,
-					"namespace", namespace,
-					"name", name,
-					"reason", result.Reason,
-					"vaultTags", vaultSecret.Tags,
-					"spcService", serviceLabel,
-					"spcEnvironment", environmentLabel)
-			}
-		}
-
-		// Filter certificates
-		var rejectedCerts int
-		for _, vaultCert := range vaultCertificates {
-			result := azure.MatchesTags(vaultCert.Tags, filterConfig)
-			if result.Include {
-				certificates = append(certificates, vaultCert.Name)
-				slog.Debug("Certificate included", "name", vaultCert.Name, "tags", vaultCert.Tags)
-			} else {
-				rejectedCerts++
-				slog.Info("Certificate rejected by tag filter",
-					"certificate", vaultCert.Name,
-					"vault", keyvaultName,
-					"namespace", namespace,
-					"name", name,
-					"reason", result.Reason,
-					"vaultTags", vaultCert.Tags,
-					"spcService", serviceLabel,
-					"spcEnvironment", environmentLabel)
-			}
-		}
-
-		slog.Info("Tag filtering complete",
-			"namespace", namespace, "name", name,
-			"secretsIncluded", len(secrets), "secretsRejected", rejectedSecrets,
-			"certsIncluded", len(certificates), "certsRejected", rejectedCerts)
-	} else {
-		// Tag filtering disabled - include all secrets and certificates
-		for _, vaultSecret := range vaultSecrets {
+		// Step 2: Check service/environment matching (if labels specified)
+		result := azure.MatchesTags(vaultSecret.Tags, filterConfig)
+		if result.Include {
 			secrets = append(secrets, vaultSecret.Name)
+			syncedSecrets++
+			slog.Debug("Secret included", "name", vaultSecret.Name, "tags", vaultSecret.Tags)
+		} else {
+			serviceEnvRejected++
+			slog.Info("Secret rejected by service/environment filter",
+				"secret", vaultSecret.Name,
+				"vault", keyvaultName,
+				"namespace", namespace,
+				"name", name,
+				"reason", result.Reason,
+				"vaultTags", vaultSecret.Tags,
+				"spcService", serviceLabel,
+				"spcEnvironment", environmentLabel)
 		}
-		for _, vaultCert := range vaultCertificates {
-			certificates = append(certificates, vaultCert.Name)
+	}
+
+	// Filter certificates: Must have sync opt-in AND match service/environment (if specified)
+	var syncedCerts, noCertSyncTag, certServiceEnvRejected int
+	for _, vaultCert := range vaultCertificates {
+		// Step 1: Check sync opt-in (sync=true OR cert-object=true)
+		if !update.ShouldSyncCert(vaultCert.Tags) {
+			noCertSyncTag++
+			slog.Debug("Certificate rejected - no sync opt-in tag",
+				"certificate", vaultCert.Name,
+				"namespace", namespace,
+				"name", name)
+			continue
 		}
 
-		slog.Debug("Tag filtering disabled, including all secrets and certificates")
+		// Step 2: Check service/environment matching (if labels specified)
+		result := azure.MatchesTags(vaultCert.Tags, filterConfig)
+		if result.Include {
+			certificates = append(certificates, vaultCert.Name)
+			syncedCerts++
+			slog.Debug("Certificate included", "name", vaultCert.Name, "tags", vaultCert.Tags)
+		} else {
+			certServiceEnvRejected++
+			slog.Info("Certificate rejected by service/environment filter",
+				"certificate", vaultCert.Name,
+				"vault", keyvaultName,
+				"namespace", namespace,
+				"name", name,
+				"reason", result.Reason,
+				"vaultTags", vaultCert.Tags,
+				"spcService", serviceLabel,
+				"spcEnvironment", environmentLabel)
+		}
 	}
+
+	slog.Info("Tag-based filtering complete",
+		"namespace", namespace, "name", name,
+		"secretsSynced", syncedSecrets, "secretsNoSyncTag", noSyncTag, "secretsServiceEnvRejected", serviceEnvRejected,
+		"certsSynced", syncedCerts, "certsNoSyncTag", noCertSyncTag, "certsServiceEnvRejected", certServiceEnvRejected)
 
 	slog.Info("Secrets to sync", "count", len(secrets), "vault", keyvaultName, "namespace", namespace, "name", name)
 	for _, secret := range secrets {
@@ -480,6 +488,29 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	// Generate secretObjects based on vault tags (secret-object=true, cert-object=true)
 	generatedSecretObjects := update.GenerateSecretObjectsFromVault(secretsWithTags, certsWithTags)
 
+	// Collect annotations from vault tags (k8s-annotation. prefix)
+	spcAnnotations := make(map[string]string)
+	for _, vaultSecret := range vaultSecrets {
+		// Only process secrets that passed tag filtering
+		included := false
+		for _, name := range secrets {
+			if name == vaultSecret.Name {
+				included = true
+				break
+			}
+		}
+		if included {
+			secretAnnotations := azure.TransformTagsToSPCAnnotations(vaultSecret.Name, vaultSecret.Tags)
+			for k, v := range secretAnnotations {
+				spcAnnotations[k] = v
+			}
+		}
+	}
+
+	slog.Info("Collected annotations from vault tags",
+		"namespace", namespace, "name", name,
+		"annotationCount", len(spcAnnotations))
+
 	var secretObjectsToSync interface{}
 	var secretObjectsChanged bool
 
@@ -530,6 +561,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		name,
 		newObjects,
 		secretObjectsToSync,
+		spcAnnotations,
 		timestamp,
 	)
 	if err != nil {
@@ -713,6 +745,772 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 	return nil
 }
 
+// watchAzureKeyVaultSync watches AzureKeyVaultSync CRDs and reconciles them
+func (ctrl *Controller) watchAzureKeyVaultSync(ctx context.Context) {
+	slog.Info("Starting AzureKeyVaultSync CRD watcher")
+
+	// Use a ticker for periodic reconciliation
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("AzureKeyVaultSync watcher shutting down")
+			return
+		case <-ticker.C:
+			// List all AzureKeyVaultSync resources
+			var akvList akvv1alpha1.AzureKeyVaultSyncList
+			listOpts := []client.ListOption{}
+
+			// Apply namespace filter if configured
+			if ctrl.watchNamespace != "" {
+				listOpts = append(listOpts, client.InNamespace(ctrl.watchNamespace))
+			}
+
+			if err := ctrl.ctrlClient.List(ctx, &akvList, listOpts...); err != nil {
+				slog.Error("Failed to list AzureKeyVaultSync resources", "error", err)
+				continue
+			}
+
+			slog.Debug("Found AzureKeyVaultSync resources", "count", len(akvList.Items))
+
+			// Reconcile each resource
+			for _, akv := range akvList.Items {
+				if err := ctrl.reconcileAzureKeyVaultSync(ctx, &akv); err != nil {
+					slog.Error("Failed to reconcile AzureKeyVaultSync",
+						"namespace", akv.Namespace,
+						"name", akv.Name,
+						"error", err)
+				}
+			}
+		}
+	}
+}
+
+// generateSecretProviderClass creates a SecretProviderClass from an AzureKeyVaultSync resource
+func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []azure.VaultSecret) *secretsstorev1.SecretProviderClass {
+	// Build array of secret objects for the SPC
+	var objects []map[string]interface{}
+
+	// Build secretsWithTags for secretObjects generation
+	var secretsWithTags []update.VaultSecretWithTags
+
+	// Track sync statistics
+	syncedCount := 0
+	skippedCount := 0
+
+	for _, secret := range secrets {
+		// Check if secret should be synced (has sync=true OR secret-object=true tag)
+		if !update.ShouldSyncSecret(secret.Tags) {
+			skippedCount++
+			slog.Debug("Secret skipped - no sync opt-in tag",
+				"secret", secret.Name,
+				"namespace", akv.Namespace,
+				"name", akv.Name)
+			continue
+		}
+
+		syncedCount++
+
+		// Create the object entry for parameters
+		obj := map[string]interface{}{
+			"objectName": secret.Name,
+			"objectType": "secret",
+		}
+		objects = append(objects, obj)
+
+		// Keep secret with tags for secretObjects generation
+		secretsWithTags = append(secretsWithTags, update.VaultSecretWithTags{
+			Name: secret.Name,
+			Tags: secret.Tags,
+		})
+	}
+
+	slog.Info("Filtered secrets by sync tag for CRD-based SPC",
+		"namespace", akv.Namespace,
+		"name", akv.Name,
+		"syncedCount", syncedCount,
+		"skippedCount", skippedCount)
+
+	// Build parameters map
+	parameters := map[string]string{
+		"keyvaultName": akv.Spec.KeyvaultName,
+		"tenantId":     akv.Spec.TenantID,
+		"clientID":     akv.Spec.ClientID,
+	}
+
+	spc := &secretsstorev1.SecretProviderClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      akv.Name, // SPC name matches CRD name
+			Namespace: akv.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: akv.APIVersion,
+					Kind:       akv.Kind,
+					Name:       akv.Name,
+					UID:        akv.UID,
+					Controller: boolPtr(true),
+					// Set based on deletePolicy
+					BlockOwnerDeletion: boolPtr(akv.Spec.DeletePolicy == akvv1alpha1.DeletePolicyCascade),
+				},
+			},
+		},
+		Spec: secretsstorev1.SecretProviderClassSpec{
+			Provider:   "azure",
+			Parameters: parameters,
+		},
+	}
+
+	// Add objects array to parameters as YAML/JSON
+	// The CSI driver expects this as a YAML string
+	if len(objects) > 0 {
+		objectsYAML, err := buildObjectsArrayString(objects)
+		if err != nil {
+			slog.Error("Failed to marshal objects array to YAML",
+				"namespace", akv.Namespace,
+				"name", akv.Name,
+				"error", err)
+			return nil
+		}
+		spc.Spec.Parameters["objects"] = objectsYAML
+	}
+
+	// Generate secretObjects based on vault tags (secret-object=true)
+	// No certificates in CRD mode, so pass empty slice for certs
+	generatedSecretObjects := update.GenerateSecretObjectsFromVault(secretsWithTags, nil)
+	if len(generatedSecretObjects) > 0 {
+		spc.Spec.SecretObjects = generatedSecretObjects
+		slog.Info("Generated secretObjects for CRD-based SPC",
+			"namespace", akv.Namespace,
+			"name", akv.Name,
+			"secretObjectCount", len(generatedSecretObjects))
+	}
+
+	// Collect annotations and labels from vault tags
+	// Annotations: k8s-annotation. prefix
+	// Labels: k8s-label. prefix
+	// These will be stored in the SPC and applied to Secrets by the Secret watcher
+	spcAnnotations := make(map[string]string)
+	for _, secret := range secrets {
+		// Only process secrets that have sync opt-in tag
+		if update.ShouldSyncSecret(secret.Tags) {
+			// Collect annotations
+			secretAnnotations := azure.TransformTagsToSPCAnnotations(secret.Name, secret.Tags)
+			for k, v := range secretAnnotations {
+				spcAnnotations[k] = v
+			}
+
+			// Collect labels (stored as annotations with different prefix)
+			secretLabels := azure.TransformTagsToSPCLabels(secret.Name, secret.Tags)
+			for k, v := range secretLabels {
+				spcAnnotations[k] = v
+			}
+		}
+	}
+
+	if len(spcAnnotations) > 0 {
+		spc.Annotations = spcAnnotations
+		slog.Info("Collected annotations and labels from vault tags for CRD-based SPC",
+			"namespace", akv.Namespace,
+			"name", akv.Name,
+			"totalCount", len(spcAnnotations))
+	}
+
+	return spc
+}
+
+// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling
+func buildObjectsArrayString(objects []map[string]interface{}) (string, error) {
+	// Wrap the objects array in a map with "array" key as expected by the CSI driver
+	wrapper := map[string]interface{}{
+		"array": objects,
+	}
+
+	// Marshal to YAML using safe library to prevent injection vulnerabilities
+	yamlBytes, err := yaml.Marshal(wrapper)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal objects array to YAML: %w", err)
+	}
+
+	return string(yamlBytes), nil
+}
+
+// compareSecretObjects compares two SecretObject slices for equality
+func compareSecretObjects(existing, desired []*secretsstorev1.SecretObject) bool {
+	if len(existing) != len(desired) {
+		return false
+	}
+
+	// Build maps for comparison
+	existingMap := make(map[string]*secretsstorev1.SecretObject)
+	for _, obj := range existing {
+		existingMap[obj.SecretName] = obj
+	}
+
+	// Check each desired object exists and matches
+	for _, desiredObj := range desired {
+		existingObj, exists := existingMap[desiredObj.SecretName]
+		if !exists {
+			return false
+		}
+
+		// Compare type
+		if existingObj.Type != desiredObj.Type {
+			return false
+		}
+
+		// Compare data array length
+		if len(existingObj.Data) != len(desiredObj.Data) {
+			return false
+		}
+
+		// Build map of existing data for comparison
+		existingData := make(map[string]string)
+		for _, data := range existingObj.Data {
+			existingData[data.Key] = data.ObjectName
+		}
+
+		// Check each desired data entry matches
+		for _, data := range desiredObj.Data {
+			if objectName, exists := existingData[data.Key]; !exists || objectName != data.ObjectName {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// compareAnnotations compares two annotation maps for equality
+// Returns true if they are equal, false if different
+func compareAnnotations(existing, desired map[string]string) bool {
+	// Different lengths means different
+	if len(existing) != len(desired) {
+		return false
+	}
+
+	// Check each desired annotation exists in existing with same value
+	for key, desiredValue := range desired {
+		existingValue, exists := existing[key]
+		if !exists || existingValue != desiredValue {
+			return false
+		}
+	}
+
+	return true
+}
+
+// boolPtr returns a pointer to a bool value
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// reconcileAzureKeyVaultSync reconciles a single AzureKeyVaultSync resource
+func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akvv1alpha1.AzureKeyVaultSync) error {
+	namespace := akv.Namespace
+	name := akv.Name
+
+	slog.Info("Reconciling AzureKeyVaultSync",
+		"namespace", namespace,
+		"name", name,
+		"vault", akv.Spec.KeyvaultName)
+
+	// Step 1: Get Kubernetes token for the service account
+	k8sToken, err := ctrl.tokenProvider.GetK8sToken(
+		ctx,
+		ctrl.clientset,
+		namespace,
+		akv.Spec.ServiceAccount,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get Kubernetes token: %w", err)
+	}
+
+	// Step 2: Exchange for Azure AD token
+	azureToken, azureTokenExpiration, err := ctrl.tokenProvider.GetAzureToken(
+		ctx,
+		namespace,
+		akv.Spec.ServiceAccount,
+		k8sToken,
+		akv.Spec.ClientID,
+		akv.Spec.TenantID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get Azure token: %w", err)
+	}
+
+	// Step 3: List secrets from vault (protected by circuit breaker)
+	var vaultSecrets []azure.VaultSecret
+	err = ctrl.azureCircuitBreaker.Call(func() error {
+		var listErr error
+		vaultSecrets, listErr = ctrl.vaultClient.ListSecrets(ctx, akv.Spec.KeyvaultName, azureToken, azureTokenExpiration)
+		return listErr
+	})
+	if err != nil {
+		if err.Error() == "circuit breaker is open" || strings.Contains(err.Error(), "circuit breaker is open") {
+			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
+				"vault", akv.Spec.KeyvaultName,
+				"namespace", namespace,
+				"name", name)
+			return nil
+		}
+		return fmt.Errorf("failed to list vault secrets: %w", err)
+	}
+
+	slog.Info("Listed vault secrets",
+		"vault", akv.Spec.KeyvaultName,
+		"count", len(vaultSecrets))
+
+	// Step 4: Apply tag filtering if filters are specified
+	filteredSecrets := azure.FilterSecretsByTags(vaultSecrets, akv.Spec.Filters)
+
+	slog.Info("Filtered secrets",
+		"vault", akv.Spec.KeyvaultName,
+		"originalCount", len(vaultSecrets),
+		"filteredCount", len(filteredSecrets),
+		"filters", akv.Spec.Filters)
+
+	// Step 5: Generate SecretProviderClass
+	desiredSPC := generateSecretProviderClass(akv, filteredSecrets)
+
+	// Step 6: Create or update the SecretProviderClass
+	existingSPC := &secretsstorev1.SecretProviderClass{}
+	err = ctrl.ctrlClient.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      name,
+	}, existingSPC)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// SPC doesn't exist, create it
+			slog.Info("Creating SecretProviderClass",
+				"namespace", namespace,
+				"name", name)
+
+			// Use the typed client to create
+			_, createErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Create(
+				ctx,
+				desiredSPC,
+				metav1.CreateOptions{},
+			)
+			if createErr != nil {
+				return fmt.Errorf("failed to create SecretProviderClass: %w", createErr)
+			}
+
+			slog.Info("SecretProviderClass created successfully",
+				"namespace", namespace,
+				"name", name)
+		} else {
+			return fmt.Errorf("failed to get SecretProviderClass: %w", err)
+		}
+	} else {
+		// SPC exists, check if update is needed
+		objectsChanged := existingSPC.Spec.Parameters["objects"] != desiredSPC.Spec.Parameters["objects"]
+		secretObjectsChanged := !compareSecretObjects(existingSPC.Spec.SecretObjects, desiredSPC.Spec.SecretObjects)
+		annotationsChanged := !compareAnnotations(existingSPC.Annotations, desiredSPC.Annotations)
+
+		if !objectsChanged && !secretObjectsChanged && !annotationsChanged {
+			slog.Info("No changes detected - skipping SPC update",
+				"namespace", namespace,
+				"name", name)
+		} else {
+			slog.Info("Changes detected - updating SecretProviderClass",
+				"namespace", namespace,
+				"name", name,
+				"objectsChanged", objectsChanged,
+				"secretObjectsChanged", secretObjectsChanged,
+				"annotationsChanged", annotationsChanged)
+
+			// Update the spec and annotations
+			existingSPC.Spec = desiredSPC.Spec
+			existingSPC.Annotations = desiredSPC.Annotations
+			existingSPC.OwnerReferences = desiredSPC.OwnerReferences
+
+			_, updateErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Update(
+				ctx,
+				existingSPC,
+				metav1.UpdateOptions{},
+			)
+			if updateErr != nil {
+				return fmt.Errorf("failed to update SecretProviderClass: %w", updateErr)
+			}
+
+			slog.Info("SecretProviderClass updated successfully",
+				"namespace", namespace,
+				"name", name)
+		}
+	}
+
+	// Step 7: Update AzureKeyVaultSync status
+	// Count secret objects (secrets with secret-object: "true" tag)
+	secretObjectCount := 0
+	for _, secret := range filteredSecrets {
+		if secret.Tags != nil {
+			if tagValue, exists := secret.Tags["secret-object"]; exists && tagValue != nil && *tagValue == "true" {
+				secretObjectCount++
+			}
+		}
+	}
+
+	// Update status fields
+	akv.Status.SecretCount = len(filteredSecrets)
+	akv.Status.SecretObjectCount = secretObjectCount
+	akv.Status.GeneratedSPCName = name
+	akv.Status.ObservedGeneration = akv.Generation
+	now := metav1.Now()
+	akv.Status.LastSyncTime = &now
+
+	// Update the status subresource
+	if err := ctrl.ctrlClient.Status().Update(ctx, akv); err != nil {
+		slog.Warn("Failed to update AzureKeyVaultSync status",
+			"namespace", namespace,
+			"name", name,
+			"error", err)
+		// Don't fail the reconciliation on status update failure
+	}
+
+	slog.Info("AzureKeyVaultSync reconciliation complete",
+		"namespace", namespace,
+		"name", name,
+		"secretCount", len(filteredSecrets),
+		"secretObjectCount", secretObjectCount)
+
+	return nil
+}
+
+// watchSecrets watches for Secret creation/updates and applies annotations from SPC metadata
+func (ctrl *Controller) watchSecrets(ctx context.Context) {
+	slog.Info("Starting Secret watcher for annotation synchronization")
+
+	// Use a ticker for periodic reconciliation of Secrets
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Secret watcher shutting down")
+			return
+		case <-ticker.C:
+			// List all Secrets in the watch namespace
+			listOpts := metav1.ListOptions{}
+
+			secrets, err := ctrl.clientset.CoreV1().Secrets(ctrl.watchNamespace).List(ctx, listOpts)
+			if err != nil {
+				slog.Error("Failed to list Secrets", "error", err)
+				continue
+			}
+
+			slog.Debug("Found Secrets to check for annotation sync", "count", len(secrets.Items))
+
+			// Process each Secret
+			for _, secret := range secrets.Items {
+				// Only process Secrets managed by secrets-store.csi.k8s.io
+				if secret.Labels == nil || secret.Labels["secrets-store.csi.k8s.io/managed"] != "true" {
+					continue
+				}
+
+				if err := ctrl.reconcileSecretAnnotations(ctx, &secret); err != nil {
+					slog.Error("Failed to reconcile Secret annotations",
+						"namespace", secret.Namespace,
+						"name", secret.Name,
+						"error", err)
+				}
+			}
+		}
+	}
+}
+
+// reconcileSecretAnnotations applies SPC annotations to a Secret
+func (ctrl *Controller) reconcileSecretAnnotations(ctx context.Context, secret *corev1.Secret) error {
+	namespace := secret.Namespace
+	name := secret.Name
+
+	slog.Debug("Reconciling Secret metadata (annotations and labels)",
+		"namespace", namespace,
+		"name", name)
+
+	// Find the SPC that manages this Secret
+	spcName, err := ctrl.findSPCForSecret(ctx, secret)
+	if err != nil {
+		return fmt.Errorf("failed to find SPC for Secret: %w", err)
+	}
+	if spcName == "" {
+		slog.Debug("No SPC found for Secret", "namespace", namespace, "name", name)
+		return nil
+	}
+
+	// Get the SPC
+	spc, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Get(
+		ctx,
+		spcName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to get SPC: %w", err)
+	}
+
+	// Extract annotations and labels for this Secret from SPC metadata
+	desiredAnnotations := azure.ExtractAnnotationsForSecret(spc.Annotations, name)
+	desiredLabels := azure.ExtractLabelsForSecret(spc.Annotations, name)
+
+	// Find annotations/labels to add or update
+	annotationsToAdd := make(map[string]string)
+	for key, desiredValue := range desiredAnnotations {
+		currentValue, exists := secret.Annotations[key]
+		if !exists || currentValue != desiredValue {
+			annotationsToAdd[key] = desiredValue
+		}
+	}
+
+	labelsToAdd := make(map[string]string)
+	for key, desiredValue := range desiredLabels {
+		currentValue, exists := secret.Labels[key]
+		if !exists || currentValue != desiredValue {
+			labelsToAdd[key] = desiredValue
+		}
+	}
+
+	// Get previously managed metadata from tracking annotations
+	previouslyManagedAnnotations := getPreviouslyManagedMetadata(secret.Annotations, azure.ManagedAnnotationsAnnotation)
+	previouslyManagedLabels := getPreviouslyManagedMetadata(secret.Annotations, azure.ManagedLabelsAnnotation)
+
+	// Find annotations to remove (were previously managed but no longer desired)
+	annotationsToRemove := []string{}
+	for _, key := range previouslyManagedAnnotations {
+		if _, stillDesired := desiredAnnotations[key]; !stillDesired {
+			annotationsToRemove = append(annotationsToRemove, key)
+		}
+	}
+
+	// Find labels to remove (were previously managed but no longer desired)
+	labelsToRemove := []string{}
+	for _, key := range previouslyManagedLabels {
+		if _, stillDesired := desiredLabels[key]; !stillDesired {
+			labelsToRemove = append(labelsToRemove, key)
+		}
+	}
+
+	// Build new tracking annotation values
+	newManagedAnnotations := buildManagedMetadataList(desiredAnnotations)
+	newManagedLabels := buildManagedMetadataList(desiredLabels)
+
+	// Add tracking annotations to the annotations we're adding
+	if newManagedAnnotations != "" {
+		annotationsToAdd[azure.ManagedAnnotationsAnnotation] = newManagedAnnotations
+	}
+	if newManagedLabels != "" {
+		annotationsToAdd[azure.ManagedLabelsAnnotation] = newManagedLabels
+	}
+
+	// Check if we need to remove tracking annotations (when no metadata is managed)
+	if newManagedAnnotations == "" && secret.Annotations != nil {
+		if _, exists := secret.Annotations[azure.ManagedAnnotationsAnnotation]; exists {
+			annotationsToRemove = append(annotationsToRemove, azure.ManagedAnnotationsAnnotation)
+		}
+	}
+	if newManagedLabels == "" && secret.Annotations != nil {
+		if _, exists := secret.Annotations[azure.ManagedLabelsAnnotation]; exists {
+			annotationsToRemove = append(annotationsToRemove, azure.ManagedLabelsAnnotation)
+		}
+	}
+
+	if len(annotationsToAdd) == 0 && len(labelsToAdd) == 0 && len(annotationsToRemove) == 0 && len(labelsToRemove) == 0 {
+		slog.Debug("Secret metadata already up to date", "namespace", namespace, "name", name)
+		return nil
+	}
+
+	// Apply metadata changes to Secret
+	if err := ctrl.patchSecretMetadata(ctx, secret, annotationsToAdd, labelsToAdd, annotationsToRemove, labelsToRemove); err != nil {
+		return fmt.Errorf("failed to patch Secret metadata: %w", err)
+	}
+
+	slog.Info("Applied metadata to Secret",
+		"namespace", namespace,
+		"name", name,
+		"annotationsAdded", len(annotationsToAdd),
+		"labelsAdded", len(labelsToAdd),
+		"annotationsRemoved", len(annotationsToRemove),
+		"labelsRemoved", len(labelsToRemove))
+
+	return nil
+}
+
+// getPreviouslyManagedMetadata extracts the list of previously managed metadata keys from a tracking annotation
+func getPreviouslyManagedMetadata(annotations map[string]string, trackingKey string) []string {
+	if annotations == nil {
+		return []string{}
+	}
+
+	value, exists := annotations[trackingKey]
+	if !exists || value == "" {
+		return []string{}
+	}
+
+	// Split comma-separated list
+	keys := strings.Split(value, ",")
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// buildManagedMetadataList creates a comma-separated list of metadata keys for tracking
+func buildManagedMetadataList(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(metadata))
+	for key := range metadata {
+		keys = append(keys, key)
+	}
+
+	// Sort for consistency
+	sort.Strings(keys)
+
+	return strings.Join(keys, ",")
+}
+
+// findSPCForSecret finds the SecretProviderClass that manages a given Secret
+func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Secret) (string, error) {
+	// Check for the secretProviderClass label (added by CSI driver)
+	if secret.Labels != nil {
+		if spcName, exists := secret.Labels["secrets-store.csi.k8s.io/secretProviderClass"]; exists {
+			return spcName, nil
+		}
+	}
+
+	// Use cache index for O(1) lookup
+	spcName := ctrl.cache.FindSPCForSecret(secret.Namespace, secret.Name)
+	if spcName != "" {
+		return spcName, nil
+	}
+
+	// Final fallback: Search for SPC with matching secretObjects
+	// This should rarely be needed if the cache is properly maintained
+	slog.Debug("Cache miss for secret lookup, falling back to API list",
+		"namespace", secret.Namespace,
+		"secretName", secret.Name)
+
+	spcList, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(secret.Namespace).List(
+		ctx,
+		metav1.ListOptions{},
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to list SPCs: %w", err)
+	}
+
+	for _, spc := range spcList.Items {
+		for _, secretObj := range spc.Spec.SecretObjects {
+			if secretObj.SecretName == secret.Name {
+				return spc.Name, nil
+			}
+		}
+	}
+
+	return "", nil
+}
+
+// patchSecretMetadata applies annotations and labels to a Secret using JSON Patch
+func (ctrl *Controller) patchSecretMetadata(ctx context.Context, secret *corev1.Secret, annotationsToAdd map[string]string, labelsToAdd map[string]string, annotationsToRemove []string, labelsToRemove []string) error {
+	// Build JSON Patch operations
+	var patchOps []map[string]interface{}
+
+	// Remove annotations first (must be done before adds if removing all)
+	for _, key := range annotationsToRemove {
+		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":   "remove",
+			"path": "/metadata/annotations/" + escapedKey,
+		})
+	}
+
+	// Remove labels first (must be done before adds if removing all)
+	for _, key := range labelsToRemove {
+		// Escape forward slashes in label keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":   "remove",
+			"path": "/metadata/labels/" + escapedKey,
+		})
+	}
+
+	// Ensure annotations map exists if we have annotations to add
+	if len(annotationsToAdd) > 0 && secret.Annotations == nil {
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations",
+			"value": map[string]string{},
+		})
+	}
+
+	// Add each annotation
+	for key, value := range annotationsToAdd {
+		// Escape forward slashes in annotation keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations/" + escapedKey,
+			"value": value,
+		})
+	}
+
+	// Ensure labels map exists if we have labels to add
+	if len(labelsToAdd) > 0 && secret.Labels == nil {
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/labels",
+			"value": map[string]string{},
+		})
+	}
+
+	// Add each label
+	for key, value := range labelsToAdd {
+		// Escape forward slashes in label keys (JSON Pointer RFC 6901)
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+
+		patchOps = append(patchOps, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/labels/" + escapedKey,
+			"value": value,
+		})
+	}
+
+	// Marshal patch to JSON
+	patchBytes, err := json.Marshal(patchOps)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch: %w", err)
+	}
+
+	// Apply the patch
+	_, err = ctrl.clientset.CoreV1().Secrets(secret.Namespace).Patch(
+		ctx,
+		secret.Name,
+		types.JSONPatchType,
+		patchBytes,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to apply patch: %w", err)
+	}
+
+	return nil
+}
+
 func (ctrl *Controller) Run(ctx context.Context) {
 	defer ctrl.queue.ShutDown()
 
@@ -721,6 +1519,16 @@ func (ctrl *Controller) Run(ctx context.Context) {
 
 	// Start periodic resync
 	go ctrl.startPeriodicResync(ctx)
+
+	// Start AzureKeyVaultSync CRD watcher
+	go ctrl.watchAzureKeyVaultSync(ctx)
+
+	// Start Secret watcher for annotation synchronization
+	go ctrl.watchSecrets(ctx)
+
+	// Start token cache cleanup routines
+	go ctrl.tokenCache.StartCleanup(ctx, 5*time.Minute)
+	go ctrl.azureTokenCache.StartCleanup(ctx, 5*time.Minute)
 
 	// Start worker pool
 	slog.Info("Starting workers", "count", ctrl.config.WorkerCount)

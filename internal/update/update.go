@@ -124,6 +124,7 @@ func PatchSecretProviderClass(
 	name string,
 	objectsYAML string,
 	secretObjects interface{},
+	annotations map[string]string,
 	timestamp string,
 ) error {
 	slog.Info("Patching SecretProviderClass", "namespace", namespace, "name", name)
@@ -142,6 +143,23 @@ func PatchSecretProviderClass(
 			"value": timestamp,
 		},
 	}
+
+	// Add per-secret annotations from vault tags
+	for key, value := range annotations {
+		// Escape annotation keys per JSON Pointer RFC 6901
+		// IMPORTANT: Must escape ~ first, then / (order matters!)
+		// ~ becomes ~0, / becomes ~1
+		escapedKey := strings.ReplaceAll(key, "~", "~0")
+		escapedKey = strings.ReplaceAll(escapedKey, "/", "~1")
+		patch = append(patch, map[string]interface{}{
+			"op":    "add",
+			"path":  "/metadata/annotations/" + escapedKey,
+			"value": value,
+		})
+	}
+
+	slog.Info("Adding annotations to SPC",
+		"namespace", namespace, "name", name, "annotationCount", len(annotations))
 
 	// Handle secretObjects field
 	if secretObjects != nil {
@@ -229,11 +247,16 @@ func secretObjectsEqual(a, b *secretsstorev1.SecretObject) bool {
 		return false
 	}
 
-	// Compare Labels
-	for k, v := range a.Labels {
-		if b.Labels[k] != v {
-			return false
+	// Compare Labels (handle nil maps)
+	if a.Labels != nil && b.Labels != nil {
+		for k, v := range a.Labels {
+			if b.Labels[k] != v {
+				return false
+			}
 		}
+	} else if (a.Labels == nil) != (b.Labels == nil) {
+		// One is nil, the other isn't - they're different
+		return false
 	}
 
 	if len(a.Data) == 0 {
@@ -279,6 +302,20 @@ func hasTag(tags map[string]*string, key string) bool {
 		return false
 	}
 	return *value == "true"
+}
+
+// ShouldSyncSecret determines if a secret should be synced to Kubernetes
+// Returns true if the secret has sync=true OR secret-object=true tag
+// secret-object=true implies sync=true (if you want a K8s Secret, you need it synced)
+func ShouldSyncSecret(tags map[string]*string) bool {
+	return hasTag(tags, "sync") || hasTag(tags, "secret-object")
+}
+
+// ShouldSyncCert determines if a certificate should be synced to Kubernetes
+// Returns true if the cert has sync=true OR cert-object=true tag
+// cert-object=true implies sync=true (if you want a K8s Secret, you need it synced)
+func ShouldSyncCert(tags map[string]*string) bool {
+	return hasTag(tags, "sync") || hasTag(tags, "cert-object")
 }
 
 // GenerateSecretObjectsFromVault generates K8s Secret objects based on vault tags

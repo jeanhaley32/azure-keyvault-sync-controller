@@ -196,3 +196,89 @@ func ListCertificates(
 	slog.Info("Listed certificates from vault", "count", len(certificates), "vault", vaultName)
 	return certificates, nil
 }
+
+// FilterSecretsByTags filters secrets based on tag key/value pairs (CRD mode).
+// If filters is nil or empty, all secrets are returned.
+// If filters is provided, only secrets matching ALL filter tags are returned.
+func FilterSecretsByTags(secrets []VaultSecret, filters map[string]string) []VaultSecret {
+	// No filters means include all secrets
+	if len(filters) == 0 {
+		slog.Debug("No filters provided, returning all secrets", "count", len(secrets))
+		return secrets
+	}
+
+	var filtered []VaultSecret
+
+	for _, secret := range secrets {
+		if MatchesAllFilters(secret.Tags, filters) {
+			filtered = append(filtered, secret)
+		}
+	}
+
+	slog.Info("Filtered secrets by tags",
+		"totalSecrets", len(secrets),
+		"matchingSecrets", len(filtered),
+		"filters", filters)
+
+	return filtered
+}
+
+// FilterCertificatesByTags filters certificates based on tag key/value pairs (CRD mode).
+// If filters is nil or empty, all certificates are returned.
+// If filters is provided, only certificates matching ALL filter tags are returned.
+func FilterCertificatesByTags(certs []VaultCertificate, filters map[string]string) []VaultCertificate {
+	// No filters means include all certificates
+	if len(filters) == 0 {
+		slog.Debug("No filters provided, returning all certificates", "count", len(certs))
+		return certs
+	}
+
+	var filtered []VaultCertificate
+
+	for _, cert := range certs {
+		if MatchesAllFilters(cert.Tags, filters) {
+			filtered = append(filtered, cert)
+		}
+	}
+
+	slog.Info("Filtered certificates by tags",
+		"totalCertificates", len(certs),
+		"matchingCertificates", len(filtered),
+		"filters", filters)
+
+	return filtered
+}
+
+// MatchesAllFilters checks if a tag map matches all required filters.
+// Returns true only if ALL filter key/value pairs are present and match exactly.
+// Returns false if tags is nil or if any filter doesn't match.
+// This is used for CRD mode filtering with arbitrary tag key/value pairs.
+func MatchesAllFilters(tags map[string]*string, filters map[string]string) bool {
+	// Nil tags means no tags - won't match any filters
+	if tags == nil {
+		return false
+	}
+
+	// All filters must match
+	for filterKey, filterValue := range filters {
+		tagValue, exists := tags[filterKey]
+
+		// Filter key doesn't exist in tags
+		if !exists {
+			return false
+		}
+
+		// Tag value is nil
+		if tagValue == nil {
+			return false
+		}
+
+		// Tag value doesn't match filter value (exact match required)
+		if *tagValue != filterValue {
+			return false
+		}
+	}
+
+	// All filters matched
+	return true
+}

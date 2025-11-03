@@ -1,11 +1,9 @@
 package azure
 
 import (
-	"log/slog"
 	"context"
 	"fmt"
-	
-	"os"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -29,6 +27,7 @@ type AzureTokenCache struct {
 type CachedAzureToken struct {
 	Token          string
 	ExpirationTime time.Time
+	IssuedAt       time.Time
 	Namespace      string
 	ServiceAccount string
 	ClientID       string
@@ -77,6 +76,7 @@ func (ac *AzureTokenCache) GetToken(
 	ac.tokens[key] = &CachedAzureToken{
 		Token:          token,
 		ExpirationTime: expiration,
+		IssuedAt:       time.Now(),
 		Namespace:      namespace,
 		ServiceAccount: serviceAccount,
 		ClientID:       clientID,
@@ -104,13 +104,25 @@ func (ac *AzureTokenCache) IsTokenValid(namespace, serviceAccount string) bool {
 
 	// Check if token needs renewal (at 80% of lifetime)
 	now := time.Now()
-	// Calculate when we should renew (20% before expiration)
-	renewalTime := cached.ExpirationTime.Add(-time.Duration(float64(time.Until(cached.ExpirationTime)) * (1 - azureTokenRenewalThreshold)))
 
-	return now.Before(renewalTime)
+	// Token already expired
+	if now.After(cached.ExpirationTime) {
+		return false
+	}
+
+	// Calculate original lifetime and remaining lifetime
+	originalLifetime := cached.ExpirationTime.Sub(cached.IssuedAt)
+	remainingLifetime := cached.ExpirationTime.Sub(now)
+
+	// Calculate renewal threshold based on original token lifetime
+	// For example, threshold of 0.8 means renew when ≤ 20% of original lifetime remains
+	renewalThresholdDuration := time.Duration(float64(originalLifetime) * (1 - azureTokenRenewalThreshold))
+
+	// Token is valid if remaining lifetime is more than the renewal threshold
+	return remainingLifetime > renewalThresholdDuration
 }
 
-// exchangeToken exchanges a Kubernetes JWT for an Azure AD access token
+// exchangeToken exchanges a Kubernetes JWT for an Azure AD access token using in-memory credentials
 func (ac *AzureTokenCache) exchangeToken(
 	ctx context.Context,
 	k8sToken string,
@@ -119,56 +131,20 @@ func (ac *AzureTokenCache) exchangeToken(
 ) (string, time.Time, error) {
 	slog.Debug("Exchanging Kubernetes token for Azure AD token")
 
-	// Write K8s token to temporary file
-	tmpFile, err := os.CreateTemp("", "k8s-token-*.jwt")
+	// Create a callback function that returns the K8s token
+	// This avoids writing the token to disk entirely
+	getAssertion := func(ctx context.Context) (string, error) {
+		return k8sToken, nil
+	}
+
+	// Create ClientAssertionCredential with in-memory token callback
+	// This is more secure than WorkloadIdentityCredential which requires writing to filesystem
+	cred, err := azidentity.NewClientAssertionCredential(tenantID, clientID, getAssertion, nil)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to create temporary token file: %w", err)
-	}
-    tmpFilePath := tmpFile.Name()
-    // Best-effort cleanup of the temporary file; ignore removal errors
-    defer func() { _ = os.Remove(tmpFilePath) }()
-
-	// Set restrictive permissions (owner read/write only)
-    if err := tmpFile.Chmod(0600); err != nil {
-        if cerr := tmpFile.Close(); cerr != nil {
-            slog.Debug("error closing temp token file after chmod failure", "error", cerr)
-        }
-		return "", time.Time{}, fmt.Errorf("failed to set token file permissions: %w", err)
+		return "", time.Time{}, fmt.Errorf("failed to create ClientAssertionCredential: %w", err)
 	}
 
-	// Write K8s token to file
-    if _, err := tmpFile.WriteString(k8sToken); err != nil {
-        if cerr := tmpFile.Close(); cerr != nil {
-            slog.Debug("error closing temp token file after write failure", "error", cerr)
-        }
-		return "", time.Time{}, fmt.Errorf("failed to write token to file: %w", err)
-	}
-    if cerr := tmpFile.Close(); cerr != nil {
-        slog.Debug("error closing temp token file after successful write", "error", cerr)
-    }
-
-	slog.Debug("Created temporary token file", "path", tmpFilePath)
-
-	// Set environment variables for WorkloadIdentityCredential
-    if err := os.Setenv("AZURE_FEDERATED_TOKEN_FILE", tmpFilePath); err != nil {
-        return "", time.Time{}, fmt.Errorf("failed to set AZURE_FEDERATED_TOKEN_FILE: %w", err)
-    }
-    if err := os.Setenv("AZURE_CLIENT_ID", clientID); err != nil {
-        return "", time.Time{}, fmt.Errorf("failed to set AZURE_CLIENT_ID: %w", err)
-    }
-    if err := os.Setenv("AZURE_TENANT_ID", tenantID); err != nil {
-        return "", time.Time{}, fmt.Errorf("failed to set AZURE_TENANT_ID: %w", err)
-    }
-
-	slog.Debug("Set environment variables for Azure authentication")
-
-	// Create WorkloadIdentityCredential
-	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to create WorkloadIdentityCredential: %w", err)
-	}
-
-	slog.Debug("Created WorkloadIdentityCredential")
+	slog.Debug("Created ClientAssertionCredential with in-memory token")
 
 	// Request Azure AD token with Key Vault scope
 	tokenResponse, err := cred.GetToken(ctx, policy.TokenRequestOptions{
@@ -182,6 +158,46 @@ func (ac *AzureTokenCache) exchangeToken(
 		"expiresAt", tokenResponse.ExpiresOn.Format(time.RFC3339))
 
 	return tokenResponse.Token, tokenResponse.ExpiresOn, nil
+}
+
+// cleanupExpired removes expired Azure tokens from the cache
+func (ac *AzureTokenCache) cleanupExpired() {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+
+	for key, cached := range ac.tokens {
+		if now.After(cached.ExpirationTime) {
+			delete(ac.tokens, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		slog.Info("Cleaned up expired Azure AD tokens from cache",
+			"removed", removed,
+			"remaining", len(ac.tokens))
+	}
+}
+
+// StartCleanup starts a background goroutine that periodically removes expired tokens
+func (ac *AzureTokenCache) StartCleanup(ctx context.Context, interval time.Duration) {
+	slog.Info("Starting Azure AD token cache cleanup routine", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Azure AD token cache cleanup routine shutting down")
+			return
+		case <-ticker.C:
+			ac.cleanupExpired()
+		}
+	}
 }
 
 // ExtractTenantID extracts the tenantId from a SecretProviderClass spec

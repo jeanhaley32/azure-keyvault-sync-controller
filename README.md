@@ -1,6 +1,25 @@
 # Azure Key Vault Sync Controller
 
-A production-ready Kubernetes controller that automatically synchronizes Azure Key Vault contents to SecretProviderClass objects using Azure Workload Identity federation.
+Manages SecretProviderClass resources based on Azure Key Vault tags instead of static YAML configuration. The vault becomes the source of truth for which secrets should be synced and how they should be exposed in Kubernetes.
+
+Built for environments using Azure Key Vault with the Secrets Store CSI Driver.
+
+## Who Should Use This
+
+**Primary Audience:**
+- **Platform Engineers** managing Kubernetes infrastructure with multiple services
+- **DevOps Teams** responsible for secret rotation and Azure Key Vault integration
+- **Security Engineers** enforcing zero-trust secret management patterns
+
+**Prerequisites Knowledge:**
+- Intermediate Kubernetes (understand CRDs, ServiceAccounts, RBAC)
+- Basic Azure concepts (Managed Identity, RBAC, Key Vault)
+- Familiarity with CSI drivers and secret management patterns
+
+**Not Suitable For:**
+- Teams not using Azure Key Vault
+- Projects without existing Secrets Store CSI Driver infrastructure
+- Organizations requiring GitOps-only secret management (consider External Secrets Operator or Sealed Secrets instead)
 
 ## Overview
 
@@ -59,6 +78,25 @@ The controller:
 
 **Result:** Your vault becomes the single source of truth. Add/remove secrets in Azure, and the controller updates Kubernetes automatically.
 
+## Alternatives Comparison
+
+| Approach | Manual YAML | External Secrets Operator | Azure Key Vault Controller (This) |
+|----------|-------------|---------------------------|----------------------------------|
+| **Setup Complexity** | Low | Medium | Medium |
+| **Ongoing Maintenance** | High (every secret change) | Low | Low |
+| **Vendor Lock-in** | None | Low (supports multi-cloud) | High (Azure only) |
+| **Secret Access Pattern** | CSI volume mount | K8s Secret creation | CSI volume mount |
+| **Azure Integration** | Native | Requires CRDs | Native (reuses Workload Identity) |
+| **Audit Trail** | Kubernetes only | External Secrets + K8s | Azure Key Vault audit logs |
+| **Best For** | < 10 secrets, simple setup | Multi-cloud, GitOps workflows | Azure-native, CSI Driver users |
+
+**When to choose this controller:**
+- ✅ Already using Azure Secrets Store CSI Driver
+- ✅ Want vault as source of truth (not GitOps)
+- ✅ Need Azure audit trail for compliance
+- ❌ Require multi-cloud secret management → Use External Secrets Operator
+- ❌ Want GitOps-driven secrets → Use Sealed Secrets or SOPS
+
 ### Prerequisites
 
 You must have the Azure Secrets Store CSI Driver infrastructure already set up:
@@ -87,57 +125,143 @@ You must have the Azure Secrets Store CSI Driver infrastructure already set up:
 
 ## Quick Start
 
-**Prerequisites:**
-- Kubernetes cluster with Azure Workload Identity installed
-- Azure Key Vault with secrets/certificates
-- Managed Identity with Key Vault RBAC permissions
-- Federated Identity Credential configured
+This controller assumes you have a working Azure Secrets Store CSI Driver setup with Workload Identity authentication.
 
-### Deployment Options
+### Prerequisites
 
-The controller supports two deployment models:
+You must complete the Azure infrastructure configuration before installing this controller.
 
-1. **Cluster-Wide** (Simple) - Single controller watches all namespaces
-2. **Namespace-Scoped** (Secure) - Per-namespace controller with isolated RBAC
+**Required Azure Configuration:**
 
-**Cluster-Wide Deployment:**
+Follow Microsoft's official documentation to set up:
+1. **[Azure Key Vault Provider for Secrets Store CSI Driver](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-driver)** - Install and configure the CSI Driver
+2. **[Configure Workload Identity for CSI Driver](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-identity-access)** - Set up ServiceAccount authentication with federated credentials
+3. **[Azure Workload Identity](https://azure.github.io/azure-workload-identity/docs/introduction.html)** - Understand the authentication model
+
+**What you need before proceeding:**
+- Kubernetes ServiceAccount with federated credential to User-Assigned Managed Identity
+- User-Assigned Managed Identity with Key Vault RBAC permissions:
+  - `Key Vault Secrets User` role (for secrets)
+  - `Key Vault Certificates User` role (for certificates)
+- A working SecretProviderClass that successfully mounts secrets via CSI Driver
+
+**Verify your setup works:**
 ```bash
-# Apply RBAC and controller (watches all namespaces)
-kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac.yaml
-kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment.yaml
+# You should be able to create a test pod that mounts secrets from your vault
+# using the CSI Driver and Workload Identity - if this works, you're ready
+# to install this controller
 ```
 
-**Namespace-Scoped Deployment (Recommended for Production):**
+### Step 1: Choose Deployment Model
+
+| Model | Use When | Security Posture |
+|-------|----------|------------------|
+| **Namespace-Scoped** | Production, multi-tenant clusters | ✅ **Recommended** - Significantly reduced blast radius |
+| **Cluster-Wide** | Dev clusters, single tenant | ⚠️ Higher blast radius |
+
+<details>
+<summary><b>Deploy Namespace-Scoped (Recommended for Production)</b></summary>
+
 ```bash
-# Set target namespace
+# Set your target namespace
 export NAMESPACE=production
 
-# Deploy namespace-scoped RBAC and controller
-kubectl apply -f - <<EOF
-$(curl -s https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac-namespaced.yaml | sed "s/\${NAMESPACE}/$NAMESPACE/g")
-EOF
+# Create namespace if it doesn't exist
+kubectl create namespace $NAMESPACE
 
-kubectl apply -f - <<EOF
-$(curl -s https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment-namespaced.yaml | sed "s/\${NAMESPACE}/$NAMESPACE/g")
-EOF
+# Deploy controller with namespace-limited RBAC
+kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac-namespaced.yaml
+kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment-namespaced.yaml
+
+# Verify controller is running
+kubectl get pods -n $NAMESPACE -l app=azure-keyvault-sync-controller
 ```
 
-See [Namespace-Scoped Examples](examples/namespace-scoped/) for detailed deployment instructions and security benefits.
+See [examples/namespace-scoped/](examples/namespace-scoped/) for detailed deployment instructions.
 
-**Create SecretProviderClass:**
+</details>
+
+<details>
+<summary><b>Deploy Cluster-Wide (Simple)</b></summary>
+
 ```bash
-# See examples/ directory for complete examples
-kubectl apply -f examples/basic-sync.yaml  # Customize with your vault details
+# Deploy controller with cluster-wide permissions
+kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/rbac.yaml
+kubectl apply -f https://raw.githubusercontent.com/jeanhaley32/azure-keyvault-sync-controller/main/deploy/deployment.yaml
+
+# Verify controller is running
+kubectl get pods -n kube-system -l app=azure-keyvault-sync-controller
 ```
 
-**Verify:**
+</details>
+
+### Step 2: Create Your First Managed SecretProviderClass
+
+Create a SecretProviderClass with the automatic sync annotation:
+
+```yaml
+# my-app-secrets.yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: my-app-secrets
+  namespace: production
+  annotations:
+    # ✨ This annotation enables automatic sync
+    azure-keyvault-sync/service-account: "my-app-workload-sa"
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: "prod-myapp-vault"          # ← Your Azure Key Vault name
+    clientID: "a1b2c3d4-1234-5678-abcd-ef01"  # ← Your Managed Identity client ID
+    tenantId: "e5f6g7h8-5678-90ab-cdef-1234"  # ← Your Azure tenant ID
+    objects: ""  # ← Controller fills this automatically!
+```
+
+**Apply it:**
 ```bash
-# Check controller logs
-kubectl logs -n kube-system -l app=azure-keyvault-sync-controller
+kubectl apply -f my-app-secrets.yaml
 
-# Verify sync completed
-kubectl get secretproviderclass <name> -o jsonpath='{.metadata.annotations.azure-keyvault-sync/last-sync}'
+# Watch the controller reconcile it
+kubectl get spc my-app-secrets -w
 ```
+
+**What happens:**
+1. Controller detects the `azure-keyvault-sync/service-account` annotation
+2. Impersonates the `my-app-workload-sa` ServiceAccount
+3. Gets Kubernetes token → exchanges for Azure AD token
+4. Lists all secrets/certificates from `prod-myapp-vault`
+5. Automatically populates the `objects` array with vault contents
+
+### Step 3: Verify Synchronization
+
+Check that synchronization completed successfully:
+
+```bash
+# Check sync status (should show recent timestamp)
+kubectl get spc my-app-secrets \
+  -o jsonpath='{.metadata.annotations.azure-keyvault-sync/last-sync}'
+# Output: 2025-11-02T19:30:15Z
+
+# View synchronized secrets in the objects array
+kubectl get spc my-app-secrets -o yaml | grep -A 20 "objects:"
+# Should show all secrets from your vault!
+
+# Check controller logs for reconciliation
+kubectl logs -l app=azure-keyvault-sync-controller --tail=50 | \
+  grep my-app-secrets
+```
+
+**🎉 Success Criteria:**
+- ✅ `last-sync` annotation shows recent timestamp (< 5 minutes ago)
+- ✅ `objects` array contains your vault secrets
+- ✅ Controller logs show "Successfully updated" message
+- ✅ No ERROR logs for this SecretProviderClass
+
+**Next Steps:**
+- [Tag vault secrets for Kubernetes Secret generation](#with-kubernetes-secret-generation)
+- [Configure multi-tenant filtering](#multi-tenant-mode-shared-vaults)
+- [Set up secret metadata synchronization](#metadata-synchronization)
 
 ## Features
 
@@ -146,6 +270,7 @@ kubectl get secretproviderclass <name> -o jsonpath='{.metadata.annotations.azure
 **Core Capabilities:**
 - **Automatic Vault Sync** - Discovers and syncs all enabled secrets/certificates from Azure Key Vault
 - **Kubernetes Secret Generation** - Optionally creates Kubernetes Secrets (Opaque and TLS types)
+- **Metadata Synchronization (Phase 6)** - Sync annotations and labels from vault tags to Kubernetes Secrets
 - **Service Account Impersonation** - Uses existing Azure Workload Identity, no centralized credentials
 - **Event-Driven Reconciliation** - Immediate updates via work queue (no waiting for periodic sync)
 - **Robust Error Handling** - Retry logic with exponential backoff, preserves data on permission errors
@@ -163,10 +288,51 @@ kubectl get secretproviderclass <name> -o jsonpath='{.metadata.annotations.azure
 - ✅ Phase 2: Token acquisition (K8s + Azure AD via Workload Identity)
 - ✅ Phase 3: Azure Key Vault integration (secrets + certificates)
 - ✅ Phase 4: SecretProviderClass updates (objects + secretObjects)
+- ✅ Phase 6: Secret metadata synchronization (annotations, labels, CRD-based operation)
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation history.
 
 ## Architecture
+
+### System Architecture
+
+```mermaid
+graph TB
+    subgraph "Kubernetes Cluster"
+        Controller[Controller Pod<br/>5 workers]
+        SPC[SecretProviderClass<br/>spec.objects]
+        SA[ServiceAccount<br/>with Azure annotations]
+        Pod[Application Pod]
+        CSI[CSI Driver]
+    end
+
+    subgraph "Azure Cloud"
+        Vault[Azure Key Vault<br/>secrets + certificates]
+        MI[Managed Identity<br/>federated to SA]
+        AAD[Azure AD<br/>token exchange]
+    end
+
+    Controller -->|watches| SPC
+    Controller -->|impersonates| SA
+    SA -->|federation| MI
+    MI -->|authenticates| AAD
+    AAD -->|returns token| Controller
+    Controller -->|lists secrets| Vault
+    Vault -->|secret metadata| Controller
+    Controller -->|updates objects array| SPC
+    Pod -->|mounts volume| CSI
+    CSI -->|reads spec| SPC
+    CSI -->|fetches secrets| Vault
+
+    style Controller fill:#4A90E2
+    style Vault fill:#FF6B6B
+    style SPC fill:#4ECDC4
+```
+
+**Why secrets aren't stored in controller:**
+- Controller only reads secret *names* and *metadata*
+- CSI Driver fetches actual secret *values* directly from vault
+- Controller never handles sensitive data
 
 ### Security Model
 
@@ -187,15 +353,36 @@ Each service should have:
 
 ### Authentication Flow
 
+```mermaid
+sequenceDiagram
+    participant C as Controller
+    participant K8s as Kubernetes API
+    participant Azure as Azure AD
+    participant KV as Key Vault
+
+    Note over C: Reconcile triggered for<br/>namespace/example-spc
+
+    C->>K8s: TokenRequest for<br/>namespace/workload-sa
+    K8s->>C: JWT token (1 hour TTL)
+
+    C->>Azure: Exchange JWT for<br/>Azure AD token
+    Note over Azure: Validates federated<br/>identity credential
+    Azure->>C: Azure AD token (TTL per tenant policy)
+
+    C->>KV: List secrets in vault
+    Note over KV: RBAC check on<br/>Managed Identity
+    KV->>C: Secret names + metadata
+
+    C->>K8s: PATCH SecretProviderClass<br/>with objects array
+    K8s->>C: Success
+
+    Note over C: Tokens cached for reuse
 ```
-Controller → Impersonates ServiceAccount
-  → Kubernetes TokenRequest API
-  → Azure Workload Identity federation
-  → Azure Managed Identity
-  → Azure Key Vault RBAC
-  → List secrets/certificates
-  → Update SecretProviderClass
-```
+
+**Token Lifecycle:**
+- **Kubernetes tokens**: 1-hour TTL, renewed at 80% (48 minutes)
+- **Azure AD tokens**: Renewed at 80% of lifetime (lifetime varies by Azure AD configuration)
+- **Token caching**: By namespace/serviceAccount (reused across vaults)
 
 ### Work Queue Pattern
 
@@ -223,6 +410,108 @@ Controller → Impersonates ServiceAccount
 - Rate limiting (max 5 concurrent reconciliations)
 - Retry logic (transient failures retry with backoff)
 - Graceful degradation (permission errors don't block other resources)
+
+### Two-Tier Reconciliation (Phase 6)
+
+Phase 6 introduces a two-tier architecture that enables annotation and label synchronization from Azure Key Vault to Kubernetes Secrets:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                 Two-Tier Reconciliation                       │
+├──────────────────────────────────────────────────────────────┤
+│  Tier 1: Controller Loop (Azure → Kubernetes)                │
+│  ┌────────────┐   ┌──────────────┐   ┌──────────────┐       │
+│  │ Azure Key  │──▶│ Controller   │──▶│ SPC with     │       │
+│  │ Vault Tags │   │ (15 min sync)│   │ Annotations  │       │
+│  └────────────┘   └──────────────┘   └──────────────┘       │
+│                                                               │
+│  Tier 2: Secret Watcher Loop (Kubernetes → Kubernetes)       │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐    │
+│  │ SPC with     │──▶│ Secret       │──▶│ Secrets with │    │
+│  │ Annotations  │   │ Watcher (30s)│   │ Metadata     │    │
+│  └──────────────┘   └──────────────┘   └──────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Tier 1 - Controller Loop:**
+- Polls Azure Key Vault (default: 15 minutes)
+- Transforms vault tags to SPC annotations
+- Makes Azure API calls (incurs cost)
+- Updates SecretProviderClass resources
+
+**Tier 2 - Secret Watcher Loop:**
+- Watches CSI-managed Secrets (30 seconds)
+- Extracts metadata from SPC annotations
+- Applies to Kubernetes Secrets
+- Pure Kubernetes operations (no Azure calls)
+
+**Cost Efficiency:**
+- Only Tier 1 makes Azure API calls
+- Tier 2 provides fast metadata propagation without Azure costs
+- Typical setup: ~$1.95/month for 12 vaults, 2 clusters
+
+**Architecture Benefits:**
+- **Reduced Azure costs:** Controller makes infrequent vault API calls
+- **Fast metadata updates:** Secret Watcher runs every 30 seconds
+- **Resilient to Azure outages:** Secret Watcher continues working
+- **SPC as cache:** SecretProviderClass stores vault metadata
+
+### Metadata Synchronization
+
+Synchronize annotations and labels from Azure Key Vault tags to Kubernetes Secrets:
+
+**Vault Tag Prefixes:**
+- `k8s-annotation.*` - Creates Secret annotations
+- `k8s-label.*` - Creates Secret labels
+
+**Example - Kubernetes Reflector Integration:**
+```bash
+# Tag a vault secret for cross-namespace replication
+az keyvault secret set-attribute \
+  --vault-name your-vault \
+  --name shared-secret \
+  --tags \
+    "secret-object=true" \
+    "k8s-annotation.reflector.v1.k8s.emberstack.com/reflection-allowed=true" \
+    "k8s-annotation.reflector.v1.k8s.emberstack.com/reflection-auto-enabled=true" \
+    "k8s-annotation.reflector.v1.k8s.emberstack.com/reflection-auto-namespaces=app-*"
+```
+
+**Result:** Secret created with Reflector annotations for automatic replication.
+
+**Example - Custom Labels:**
+```bash
+# Add labels for service mesh or monitoring
+az keyvault secret set-attribute \
+  --vault-name your-vault \
+  --name api-key \
+  --tags \
+    "secret-object=true" \
+    "k8s-label.app=myapp" \
+    "k8s-label.team=platform" \
+    "k8s-label.cost-center=engineering"
+```
+
+**Safe Metadata Removal:**
+- Tracking annotations record managed metadata
+- When vault tags deleted, metadata automatically removed from Secrets
+- User-added and system labels/annotations preserved
+- No manual cleanup required
+
+**Transformation Flow:**
+```
+Azure Vault Tag:
+  k8s-annotation.owner = "platform-team"
+
+SPC Annotation:
+  secret-metadata.azure-keyvault-sync.io/api-key.owner: "platform-team"
+
+Kubernetes Secret:
+  annotations:
+    owner: "platform-team"
+```
+
+For complete metadata sync documentation, see [TESTING.md](TESTING.md#testing-secret-metadata-sync-phase-6).
 
 ## Usage
 
@@ -303,58 +592,111 @@ spec:
 | Annotation | Required | Description |
 |------------|----------|-------------|
 | `azure-keyvault-sync/service-account` | **Yes** | ServiceAccount name for impersonation. **Presence of this annotation enables automatic sync** (implicit opt-in) |
-| `azure-keyvault-sync/respect-tags` | No | Set to `"true"` to enable tag-based filtering (see Tag Filtering section) |
 | `azure-keyvault-sync/last-sync` | Auto | Timestamp of last successful sync (set by controller) |
 
-### Azure Key Vault Tags Reference
+### Azure Key Vault Tags Reference (Required)
+
+**⚠️ Breaking Change in v2.0:** All secrets/certificates must have explicit opt-in tags. See [MIGRATION.md](MIGRATION.md) for upgrade guide.
 
 | Tag | Values | Description |
 |-----|--------|-------------|
-| `service` | string | Required for tag filtering; matches against SPC `service` label |
-| `environment` | string | Optional for environment separation; matches against SPC `environment` label |
-| `secret-object` | `"true"` | Must be exactly `"true"` (lowercase) to generate a Kubernetes Secret (type: Opaque) |
-| `cert-object` | `"true"` | Must be exactly `"true"` (lowercase) to generate a Kubernetes Secret (type: kubernetes.io/tls) |
+| `sync` | `"true"` | **REQUIRED**: Opt-in to sync this secret/certificate to Kubernetes. Without this tag, the secret is ignored |
+| `secret-object` | `"true"` | Optional: Generate Kubernetes Secret (type: Opaque). **Implies `sync: "true"`** |
+| `cert-object` | `"true"` | Optional: Generate Kubernetes TLS Secret (type: kubernetes.io/tls). **Implies `sync: "true"`** |
+| `service` | string | Optional: For multi-tenant vaults; must match SPC `service` label |
+| `environment` | string | Optional: For environment-specific secrets; must match SPC `environment` label |
 
-### Tag Filtering
+### Tag Filtering & Sync Behavior
 
-Enable **tag-based filtering** to selectively sync secrets from shared vaults based on service and environment.
+**⚠️ Opinionated Philosophy:** Azure Key Vault tags are the single source of truth. The controller uses a two-level hierarchy:
 
-#### Basic Tag Filtering Setup
+```
+1. Sync Opt-In (REQUIRED):
+   sync: "true"              → Explicit opt-in to sync this secret
+   secret-object: "true"     → Implies sync + creates K8s Secret
+   cert-object: "true"       → Implies sync + creates K8s TLS Secret
 
-1. **Tag secrets in Azure Key Vault:**
-```bash
-# Tag a production web API secret
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name db-password \
-  --tags service=web-api environment=production
-
-# Tag a staging web API secret
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name db-password-staging \
-  --tags service=web-api environment=staging
-
-# Tag an environment-agnostic secret (no environment tag)
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name api-key \
-  --tags service=web-api
+2. Multi-Tenant Filtering (OPTIONAL):
+   service: "app-name"       → Filter by service (when SPC has service label)
+   environment: "prod"       → Filter by environment (when SPC has environment label)
 ```
 
-2. **Configure SecretProviderClass:**
+#### Single-Tenant Mode (Simple Vaults)
+
+For vaults used by a single application, only the sync opt-in is required:
+
+**Tag secrets in Azure:**
+```bash
+# Basic sync opt-in
+az keyvault secret set-attributes \
+  --vault-name my-app-vault \
+  --name database-password \
+  --tags sync=true
+
+# With K8s Secret generation
+az keyvault secret set-attributes \
+  --vault-name my-app-vault \
+  --name api-key \
+  --tags sync=true secret-object=true
+```
+
+**SecretProviderClass:**
 ```yaml
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: web-api-secrets
+  name: my-app
+  namespace: default
+  # No service/environment labels needed
+  annotations:
+    azure-keyvault-sync/service-account: "my-app"
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: "my-app-vault"
+    clientID: "00000000-0000-0000-0000-000000000000"
+    tenantId: "11111111-1111-1111-1111-111111111111"
+```
+
+**Result:** All secrets with `sync: "true"` (or secret-object/cert-object tags) are synced.
+
+#### Multi-Tenant Mode (Shared Vaults)
+
+For vaults shared by multiple services, add service/environment tags AND SPC labels:
+
+**Tag secrets in Azure:**
+```bash
+# Production web API secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name web-db-password \
+  --tags sync=true service=web-api environment=production
+
+# Staging web API secret
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name web-db-password-staging \
+  --tags sync=true service=web-api environment=staging
+
+# Environment-agnostic secret (no environment tag)
+az keyvault secret set-attributes \
+  --vault-name shared-vault \
+  --name web-api-key \
+  --tags sync=true service=web-api
+```
+
+**SecretProviderClass:**
+```yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: web-api-prod
   namespace: production
   labels:
-    service: web-api          # Required when respect-tags enabled
-    environment: production    # Optional (allows env-agnostic secrets)
+    service: web-api          # Enables service filtering
+    environment: production    # Enables environment filtering
   annotations:
     azure-keyvault-sync/service-account: "web-api"
-    azure-keyvault-sync/respect-tags: "true"  # Enable tag filtering
 spec:
   provider: azure
   parameters:
@@ -364,52 +706,68 @@ spec:
 ```
 
 **Result:**
-- ✅ `db-password` - Included (service+env match)
-- ❌ `db-password-staging` - Rejected (env mismatch)
-- ✅ `api-key` - Included (service match, env-agnostic)
+- ✅ `web-db-password` - Synced (has sync tag + service/env match)
+- ❌ `web-db-password-staging` - Filtered out (env mismatch)
+- ✅ `web-api-key` - Synced (has sync tag + service match, env-agnostic)
 
-#### Tag Filtering Behavior
+#### Filtering Rules
 
-**Service Tag (Required):**
-- Vault secret MUST have `service` tag matching SPC `service` label
-- Secrets without `service` tag are REJECTED (strict mode)
-- Case-insensitive matching (`Web-API` matches `web-api`)
+**Level 1: Sync Opt-In (Always Enforced)**
+- Vault secret/cert MUST have `sync: "true"` OR `secret-object: "true"` OR `cert-object: "true"`
+- Without opt-in tag, secret is ignored regardless of other tags
 
-**Environment Tag (Optional):**
-- If vault secret has `environment` tag, it must match SPC `environment` label
-- Secrets without `environment` tag are treated as environment-agnostic (shared across all environments)
-- SPC can have `environment` label and still sync env-agnostic secrets
+**Level 2: Multi-Tenant Filtering (Conditional)**
+- Only applied when SPC has service/environment labels
+- If SPC has NO labels → all secrets with sync opt-in are included (single-tenant mode)
+- If SPC has service label → vault secrets must have matching service tag
+- If vault secret has environment tag → must match SPC environment label (if present)
+- Vault secrets without environment tag are treated as environment-agnostic
 
 **Examples:**
 
 | Vault Tags | SPC Labels | Result |
 |-------------|------------|--------|
-| `service: web-api` | `service: web-api` | ✅ Included |
-| `service: web-api, environment: prod` | `service: web-api, environment: prod` | ✅ Included |
-| `service: web-api, environment: prod` | `service: web-api, environment: staging` | ❌ Rejected (env mismatch) |
-| `service: web-api` | `service: web-api, environment: prod` | ✅ Included (env-agnostic) |
-| `service: mobile-api` | `service: web-api` | ❌ Rejected (service mismatch) |
-| No tags | `service: web-api` | ❌ Rejected (no service tag) |
+| `sync: true` | _(none)_ | ✅ Synced (single-tenant) |
+| `sync: true, service: web` | `service: web` | ✅ Synced |
+| `sync: true, service: web, env: prod` | `service: web, env: prod` | ✅ Synced |
+| `sync: true, service: web, env: prod` | `service: web, env: staging` | ❌ Filtered (env mismatch) |
+| `sync: true, service: web` | `service: web, env: prod` | ✅ Synced (env-agnostic) |
+| `secret-object: true, service: web` | `service: web` | ✅ Synced (secret-object implies sync) |
+| `service: web` | `service: web` | ❌ Filtered (no sync opt-in) |
+| _(no tags)_ | _(any)_ | ❌ Filtered (no sync opt-in) |
 
-#### Combined Tag Filtering + Secret Generation
+**Decision Tree:**
 
-Tag filtering runs FIRST, then secret-object evaluation. Only secrets that pass filtering are evaluated for Kubernetes Secret generation.
+```mermaid
+graph TD
+    Start[Vault Secret] --> HasSync{Has sync:true OR<br/>secret-object:true OR<br/>cert-object:true?}
+    HasSync -->|No| Reject1[❌ Filtered Out]
+    HasSync -->|Yes| HasSPCLabels{SPC has service<br/>or env labels?}
 
-```bash
-# This secret will be synced AND generated as K8s Secret
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name db-password \
-  --tags service=web-api environment=production secret-object=true
+    HasSPCLabels -->|No| Accept1[✅ Synced<br/>Single-tenant mode]
 
-# This secret is rejected by filtering, secret-object tag is NOT evaluated
-az keyvault secret set-attributes \
-  --vault-name shared-vault \
-  --name mobile-secret \
-  --tags service=mobile-api secret-object=true
+    HasSPCLabels -->|Yes| HasService{Secret has<br/>service tag?}
+    HasService -->|No| Reject2[❌ Filtered Out<br/>Missing service tag]
+    HasService -->|Yes| ServiceMatch{Service tag<br/>matches SPC label?}
+    ServiceMatch -->|No| Reject3[❌ Filtered Out<br/>Service mismatch]
+    ServiceMatch -->|Yes| HasEnvTag{Secret has<br/>environment tag?}
+
+    HasEnvTag -->|No| Accept2[✅ Synced<br/>Environment-agnostic]
+    HasEnvTag -->|Yes| EnvMatch{Environment matches<br/>SPC label?}
+    EnvMatch -->|No| Reject4[❌ Filtered Out<br/>Environment mismatch]
+    EnvMatch -->|Yes| Accept3[✅ Synced<br/>Full match]
+
+    style Accept1 fill:#90EE90
+    style Accept2 fill:#90EE90
+    style Accept3 fill:#90EE90
+    style Reject1 fill:#FFB6C1
+    style Reject2 fill:#FFB6C1
+    style Reject3 fill:#FFB6C1
+    style Reject4 fill:#FFB6C1
 ```
 
 **For complete tag filtering documentation, see:**
+- [MIGRATION.md](MIGRATION.md) - Upgrade guide for breaking changes
 - [Tag Filtering Decision Tree](docs/design/tag-filtering-decision-tree.md) - Comprehensive decision logic and scenarios
 - [examples/tag-filtering/](examples/tag-filtering/) - Working examples
 
@@ -530,8 +888,8 @@ The controller implements multiple layers of rate limiting to protect both Kuber
 - **Format:** JWT with claims for Azure Workload Identity federation
 
 **Azure AD Tokens:**
-- **Expiration:** 28 hours (Azure-configured lifetime)
-- **Renewal:** 80% of lifetime (22.4 hours before expiry)
+- **Expiration:** Determined by Azure AD tenant policy (controller uses whatever Azure returns)
+- **Renewal:** 80% of token lifetime
 - **Scope:** `https://vault.azure.net/.default` (service-level)
 - **Format:** JWT with claims for Azure Key Vault access
 - **Cache:** By namespace/serviceAccount (reusable across vaults)
@@ -629,6 +987,65 @@ Check when a resource was last synced:
 ```bash
 kubectl get secretproviderclass example-secrets -o jsonpath='{.metadata.annotations.azure-keyvault-sync/last-sync}'
 # Output: 2025-10-26T23:24:58Z
+```
+
+### Health Check Endpoints
+
+The controller exposes health check endpoints on port 8080 (configurable via `HEALTH_CHECK_PORT`):
+
+```bash
+# Liveness probe - is controller running?
+curl http://localhost:8080/healthz
+# Returns: 200 OK
+
+# Readiness probe - can controller reconcile?
+curl http://localhost:8080/readyz
+# Returns: 200 OK (controller is ready)
+# Returns: 503 Service Unavailable (not ready, e.g., initial cache sync)
+```
+
+**Kubernetes Probes:**
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+### Key Performance Indicators
+
+Track these metrics to measure controller effectiveness:
+
+| Metric | How to Check | Good Value |
+|--------|--------------|------------|
+| **Sync Lag** | Check `last-sync` annotation timestamp | < 5 minutes from current time |
+| **Sync Success Rate** | Count ERROR logs vs successful reconciliations | > 95% success |
+| **Token Cache Performance** | Look for "Token cached" vs "Acquiring token" logs | > 90% cache hits |
+| **Reconciliation Time** | Check logs: "Successfully updated..." - "Reconciling..." | < 10 seconds per SPC |
+
+**Commands:**
+
+```bash
+# Check sync lag for all SPCs
+kubectl get secretproviderclass -A \
+  -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,LAST-SYNC:.metadata.annotations.azure-keyvault-sync/last-sync'
+
+# Check controller error rate
+kubectl logs -l app=azure-keyvault-sync-controller -n kube-system --tail=1000 | \
+  grep -c "ERROR"
+
+# Monitor reconciliation activity
+kubectl logs -l app=azure-keyvault-sync-controller -n kube-system -f | \
+  grep "Successfully updated"
 ```
 
 ## Troubleshooting
@@ -772,7 +1189,7 @@ The controller is **Pod Security Standards (PSS) Restricted-compliant**:
 - **Blast Radius:** Single namespace only
 - **Token Creation:** Limited to same namespace ServiceAccounts
 - **RBAC:** Role (namespace-only) instead of ClusterRole
-- **Security:** 90%+ reduction in privilege escalation risk
+- **Security:** Significantly reduced privilege escalation risk (limited to single namespace)
 
 **Cluster-Wide (Simple Deployment):**
 - **Blast Radius:** Entire cluster
@@ -785,6 +1202,23 @@ The controller is **Pod Security Standards (PSS) Restricted-compliant**:
 - Production environments
 - Security-critical deployments
 - Defense in depth required
+
+### Threat Model & Mitigations
+
+| Threat | Risk Without Controller | Risk With Controller | Mitigation |
+|--------|------------------------|----------------------|------------|
+| **Compromised Controller** | N/A | Attacker can read secret *names* from vaults | ✅ Controller never accesses secret values<br/>✅ Namespace-scoped limits blast radius<br/>✅ RBAC audit trail for `serviceaccounts/token` |
+| **RBAC Misconfiguration** | Manual credentials in Secrets | Centralized token creation permission | ✅ Audit `serviceaccounts/token` permission<br/>✅ Use namespace-scoped deployment<br/>✅ Limit controller to specific namespace |
+| **Token Theft** | Long-lived credentials | 1-hour K8s tokens, 28-hour Azure tokens | ✅ Auto-rotation every 48 minutes (K8s)<br/>✅ Tokens stored in memory only<br/>✅ No persistent token storage |
+| **Unauthorized Vault Access** | Service credentials stored in cluster | Workload Identity federation | ✅ No credentials stored in cluster<br/>✅ Azure audit logs show actual identity<br/>✅ Federated identity requires valid K8s token |
+| **Secret Value Exposure** | Secrets in etcd | Secrets in etcd + vault | ✅ Controller never reads secret values<br/>✅ CSI Driver fetches values directly<br/>✅ Controller only handles metadata |
+
+**Security Assumptions:**
+- Kubernetes API server is trusted and properly secured
+- Azure AD token exchange endpoint is trusted
+- CSI Driver properly isolates pod-level secrets
+- RBAC prevents unauthorized `serviceaccounts/token` creation
+- Network policies protect controller endpoints
 
 See [docs/design/security-analysis.md](docs/design/security-analysis.md) for detailed security assessment and recommendations.
 
@@ -800,7 +1234,7 @@ Complete documentation is available in the [docs/](docs/) directory:
 ### For Developers
 - [Architecture Overview](docs/design/security-analysis.md) - System design
 - [Testing Guide](#testing) - Running tests
-- [Historical Planning](docs/archive/) - Archived planning documents (2024-2025)
+- [Historical Planning](docs/archive/) - Archived planning documents
 
 ### Additional Resources
 - [CHANGELOG.md](CHANGELOG.md) - Version history
@@ -821,19 +1255,6 @@ make test-coverage
 # Run tests in verbose mode
 make test-verbose
 ```
-
-**Test Coverage:**
-- `internal/cache` - 100% coverage
-- `internal/circuitbreaker` - 100% coverage
-- `internal/config` - 98.5% coverage
-- `internal/update` - 82.2% coverage
-
-## Next Steps
-
-**Phase 5: Production Enhancements** (Future)
-- Integration and e2e tests
-- GoDoc API reference documentation
-- Release process documentation
 
 ## License
 

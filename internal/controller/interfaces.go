@@ -28,6 +28,6 @@ type VaultClient interface {
 
 // PatchClient abstracts Kubernetes SecretProviderClass patching
 type PatchClient interface {
-	// PatchSecretProviderClass updates a SecretProviderClass with new objects and secretObjects
-	PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error
+	// PatchSecretProviderClass updates a SecretProviderClass with new objects, secretObjects, and annotations
+	PatchSecretProviderClass(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error
 }

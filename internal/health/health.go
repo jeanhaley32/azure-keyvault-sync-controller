@@ -127,7 +127,8 @@ func StatusHandler(checker *HealthChecker) http.HandlerFunc {
 }
 
 // StartHealthCheckServer starts the HTTP server for health checks
-func StartHealthCheckServer(addr string, checker *HealthChecker) error {
+// Returns the server instance for graceful shutdown control
+func StartHealthCheckServer(addr string, checker *HealthChecker) (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", HealthzHandler)
 	mux.HandleFunc("/readyz", ReadyzHandler(checker))
@@ -141,5 +142,12 @@ func StartHealthCheckServer(addr string, checker *HealthChecker) error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	return server.ListenAndServe()
+	// Start server in background and return instance immediately
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("Health check server failed", "error", err)
+		}
+	}()
+
+	return server, nil
 }

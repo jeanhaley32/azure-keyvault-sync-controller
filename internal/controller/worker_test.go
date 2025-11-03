@@ -47,7 +47,7 @@ func TestProcessNextItem(t *testing.T) {
 
 		// Mock patch client
 		ctrl.patchClient = &MockPatchClient{
-			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 				return nil
 			},
 		}
@@ -150,7 +150,7 @@ func TestReconcile(t *testing.T) {
 
 		// Mock patch client
 		ctrl.patchClient = &MockPatchClient{
-			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 				return nil
 			},
 		}
@@ -220,15 +220,17 @@ func TestDrainQueue(t *testing.T) {
 		key1, _ := ctrl.queue.Get()
 		key2, _ := ctrl.queue.Get()
 
-		// Start draining in goroutine
-		done := make(chan bool)
+		// Start draining in goroutine with synchronization
+		drainStarted := make(chan struct{})
+		done := make(chan struct{})
 		go func() {
+			close(drainStarted) // Signal that goroutine started
 			ctrl.drainQueue()
-			done <- true
+			close(done)
 		}()
 
-		// Mark items as done after a short delay
-		time.Sleep(100 * time.Millisecond)
+		// Wait for drain to start before marking items done
+		<-drainStarted
 		ctrl.queue.Done(key1)
 		ctrl.queue.Done(key2)
 
@@ -263,14 +265,35 @@ func TestStartPeriodicResync(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 
+		resyncOccurred := make(chan struct{}, 1)
+
+		// Monitor queue to detect when items are added
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+					if ctrl.queue.Len() > 0 {
+						select {
+						case resyncOccurred <- struct{}{}:
+						default:
+						}
+					}
+				}
+			}
+		}()
+
 		go ctrl.startPeriodicResync(ctx)
 
-		// Wait for at least one resync to occur
-		time.Sleep(250 * time.Millisecond)
-
-		// Queue should have been populated (at least once)
-		// Note: There might be multiple entries due to multiple ticks
-		assert.GreaterOrEqual(t, ctrl.queue.Len(), 1)
+		// Wait for resync to populate queue or timeout
+		select {
+		case <-resyncOccurred:
+			// Resync occurred and queue was populated
+			assert.GreaterOrEqual(t, ctrl.queue.Len(), 1)
+		case <-ctx.Done():
+			t.Fatal("periodic resync did not populate queue within timeout")
+		}
 	})
 
 	t.Run("periodic resync stops on context cancellation", func(t *testing.T) {
@@ -314,6 +337,9 @@ func TestWorker(t *testing.T) {
 		spc.Spec.Parameters["clientID"] = "test-client-id"
 		env.WithSecretProviderClass(spc)
 
+		// Channel to signal when vault API is called (which happens during reconcile)
+		vaultCalled := make(chan struct{}, 1)
+
 		// Mock dependencies for successful processing
 		ctrl.tokenProvider = &MockTokenProvider{
 			GetK8sTokenFunc: func(ctx context.Context, clientset kubernetes.Interface, namespace, serviceAccount string) (string, error) {
@@ -325,6 +351,11 @@ func TestWorker(t *testing.T) {
 		}
 		ctrl.vaultClient = &MockVaultClient{
 			ListSecretsFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultSecret, error) {
+				// Signal that reconcile reached vault interaction
+				select {
+				case vaultCalled <- struct{}{}:
+				default:
+				}
 				return []azure.VaultSecret{}, nil
 			},
 			ListCertificatesFunc: func(ctx context.Context, vaultName, token string, expiration time.Time) ([]azure.VaultCertificate, error) {
@@ -332,7 +363,7 @@ func TestWorker(t *testing.T) {
 			},
 		}
 		ctrl.patchClient = &MockPatchClient{
-			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, timestamp string) error {
+			PatchSecretProviderClassFunc: func(ctx context.Context, namespace, name, objectsYAML string, secretObjects interface{}, annotations map[string]string, timestamp string) error {
 				return nil
 			},
 		}
@@ -349,8 +380,33 @@ func TestWorker(t *testing.T) {
 			done <- true
 		}()
 
-		// Wait for item to be processed
-		time.Sleep(200 * time.Millisecond)
+		// Wait for vault to be called (indicating reconcile is in progress)
+		select {
+		case <-vaultCalled:
+			// Reconcile started vault operations
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("worker did not start processing item in time")
+		}
+
+		// Now poll for the item to appear in cache (reconcile complete)
+		cacheUpdated := make(chan struct{})
+		go func() {
+			for {
+				if ctrl.cache.Has("default", "test-spc") {
+					close(cacheUpdated)
+					return
+				}
+				// Yield to scheduler to allow other goroutines to run
+				time.Sleep(time.Millisecond)
+			}
+		}()
+
+		select {
+		case <-cacheUpdated:
+			// Cache was updated successfully
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("worker did not update cache after processing")
+		}
 
 		// Item should be in cache after processing
 		assert.True(t, ctrl.cache.Has("default", "test-spc"))

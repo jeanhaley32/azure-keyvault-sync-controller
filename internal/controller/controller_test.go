@@ -228,7 +228,6 @@ func TestTagFilteringAndSecretObjectIntegration(t *testing.T) {
 			var filteredCertNames []string
 
 			filterConfig := azure.TagFilterConfig{
-				RespectTags:      tt.respectTags,
 				ServiceLabel:     tt.spcServiceLabel,
 				EnvironmentLabel: tt.spcEnvironmentLabel,
 			}
@@ -334,25 +333,14 @@ func TestTagFilteringEdgeCases(t *testing.T) {
 	tests := []struct {
 		name            string
 		vaultTags       map[string]*string
-		respectTags     bool
 		serviceLabel    string
 		environmentLabel string
 		shouldInclude   bool
 		reason          string
 	}{
 		{
-			name:            "nil tags with filtering disabled",
+			name:            "nil tags with service label set",
 			vaultTags:       nil,
-			respectTags:     false,
-			serviceLabel:    "web-api",
-			environmentLabel: "",
-			shouldInclude:   true,
-			reason:          "filtering disabled includes all",
-		},
-		{
-			name:            "nil tags with filtering enabled",
-			vaultTags:       nil,
-			respectTags:     true,
 			serviceLabel:    "web-api",
 			environmentLabel: "",
 			shouldInclude:   false,
@@ -361,7 +349,6 @@ func TestTagFilteringEdgeCases(t *testing.T) {
 		{
 			name:            "empty string service tag",
 			vaultTags:       map[string]*string{"service": ptr("")},
-			respectTags:     true,
 			serviceLabel:    "web-api",
 			environmentLabel: "",
 			shouldInclude:   false,
@@ -373,7 +360,6 @@ func TestTagFilteringEdgeCases(t *testing.T) {
 				"service":     ptr("WEB-API"),
 				"environment": ptr("PRODUCTION"),
 			},
-			respectTags:      true,
 			serviceLabel:     "web-api",
 			environmentLabel: "production",
 			shouldInclude:    true,
@@ -384,7 +370,6 @@ func TestTagFilteringEdgeCases(t *testing.T) {
 			vaultTags: map[string]*string{
 				"service": ptr("  web-api  "),
 			},
-			respectTags:      true,
 			serviceLabel:     "web-api",
 			environmentLabel: "",
 			shouldInclude:    true,
@@ -398,7 +383,6 @@ func TestTagFilteringEdgeCases(t *testing.T) {
 				"cost-center":   ptr("engineering"),
 				"secret-object": ptr("true"),
 			},
-			respectTags:      true,
 			serviceLabel:     "web-api",
 			environmentLabel: "",
 			shouldInclude:    true,
@@ -409,7 +393,6 @@ func TestTagFilteringEdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			filterConfig := azure.TagFilterConfig{
-				RespectTags:      tt.respectTags,
 				ServiceLabel:     tt.serviceLabel,
 				EnvironmentLabel: tt.environmentLabel,
 			}

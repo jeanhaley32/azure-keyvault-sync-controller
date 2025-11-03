@@ -87,10 +87,21 @@ func (tc *TokenCache) IsTokenValid(namespace, serviceAccount string) bool {
 
 	// Calculate renewal time (80% of token lifetime)
 	now := time.Now()
-	renewalTime := cached.ExpirationTime.Add(-time.Duration(float64(tokenExpirationSeconds) * (1 - tokenRenewalThreshold)) * time.Second)
 
-	// Token is valid if we haven't reached renewal threshold
-	return now.Before(renewalTime)
+	// Token already expired
+	if now.After(cached.ExpirationTime) {
+		return false
+	}
+
+	// Calculate remaining lifetime
+	remainingLifetime := cached.ExpirationTime.Sub(now)
+
+	// Calculate renewal threshold based on original token lifetime
+	// For 1-hour tokens (3600s), threshold of 0.8 means renew when ≤ 720s (20%) remains
+	renewalThresholdDuration := time.Duration(float64(tokenExpirationSeconds) * (1 - tokenRenewalThreshold)) * time.Second
+
+	// Token is valid if remaining lifetime is more than the renewal threshold
+	return remainingLifetime > renewalThresholdDuration
 }
 
 // GetToken retrieves a cached token or requests a new one
@@ -121,6 +132,46 @@ func (tc *TokenCache) GetToken(ctx context.Context, clientset kubernetes.Interfa
 	tc.mu.Unlock()
 
 	return token, nil
+}
+
+// cleanupExpired removes expired tokens from the cache
+func (tc *TokenCache) cleanupExpired() {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+
+	for key, cached := range tc.tokens {
+		if now.After(cached.ExpirationTime) {
+			delete(tc.tokens, key)
+			removed++
+		}
+	}
+
+	if removed > 0 {
+		slog.Info("Cleaned up expired Kubernetes tokens from cache",
+			"removed", removed,
+			"remaining", len(tc.tokens))
+	}
+}
+
+// StartCleanup starts a background goroutine that periodically removes expired tokens
+func (tc *TokenCache) StartCleanup(ctx context.Context, interval time.Duration) {
+	slog.Info("Starting Kubernetes token cache cleanup routine", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Kubernetes token cache cleanup routine shutting down")
+			return
+		case <-ticker.C:
+			tc.cleanupExpired()
+		}
+	}
 }
 
 // ExtractClientID extracts the clientID from SecretProviderClass spec.parameters
