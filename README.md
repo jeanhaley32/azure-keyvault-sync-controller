@@ -156,7 +156,7 @@ Follow Microsoft's official documentation to set up:
 
 | Model | Use When | Security Posture |
 |-------|----------|------------------|
-| **Namespace-Scoped** | Production, multi-tenant clusters | ✅ **Recommended** - 90% privilege reduction |
+| **Namespace-Scoped** | Production, multi-tenant clusters | ✅ **Recommended** - Significantly reduced blast radius |
 | **Cluster-Wide** | Dev clusters, single tenant | ⚠️ Higher blast radius |
 
 <details>
@@ -367,7 +367,7 @@ sequenceDiagram
 
     C->>Azure: Exchange JWT for<br/>Azure AD token
     Note over Azure: Validates federated<br/>identity credential
-    Azure->>C: Azure AD token (28 hour TTL)
+    Azure->>C: Azure AD token (TTL per tenant policy)
 
     C->>KV: List secrets in vault
     Note over KV: RBAC check on<br/>Managed Identity
@@ -381,7 +381,7 @@ sequenceDiagram
 
 **Token Lifecycle:**
 - **Kubernetes tokens**: 1-hour TTL, renewed at 80% (48 minutes)
-- **Azure AD tokens**: 28-hour TTL, renewed at 80% (22.4 hours)
+- **Azure AD tokens**: Renewed at 80% of lifetime (lifetime varies by Azure AD configuration)
 - **Token caching**: By namespace/serviceAccount (reused across vaults)
 
 ### Work Queue Pattern
@@ -888,8 +888,8 @@ The controller implements multiple layers of rate limiting to protect both Kuber
 - **Format:** JWT with claims for Azure Workload Identity federation
 
 **Azure AD Tokens:**
-- **Expiration:** 28 hours (Azure-configured lifetime)
-- **Renewal:** 80% of lifetime (22.4 hours before expiry)
+- **Expiration:** Determined by Azure AD tenant policy (controller uses whatever Azure returns)
+- **Renewal:** 80% of token lifetime
 - **Scope:** `https://vault.azure.net/.default` (service-level)
 - **Format:** JWT with claims for Azure Key Vault access
 - **Cache:** By namespace/serviceAccount (reusable across vaults)
@@ -1189,7 +1189,7 @@ The controller is **Pod Security Standards (PSS) Restricted-compliant**:
 - **Blast Radius:** Single namespace only
 - **Token Creation:** Limited to same namespace ServiceAccounts
 - **RBAC:** Role (namespace-only) instead of ClusterRole
-- **Security:** 90%+ reduction in privilege escalation risk
+- **Security:** Significantly reduced privilege escalation risk (limited to single namespace)
 
 **Cluster-Wide (Simple Deployment):**
 - **Blast Radius:** Entire cluster
