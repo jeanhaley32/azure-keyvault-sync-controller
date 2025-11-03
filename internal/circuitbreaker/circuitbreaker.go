@@ -17,6 +17,7 @@ import (
 type CircuitBreaker struct {
 	maxFailures  int
 	resetTimeout time.Duration
+	clock        Clock
 
 	failures     int
 	lastFailTime time.Time
@@ -32,6 +33,17 @@ func NewCircuitBreaker(maxFailures int, resetTimeout time.Duration) *CircuitBrea
 	return &CircuitBreaker{
 		maxFailures:  maxFailures,
 		resetTimeout: resetTimeout,
+		clock:        NewRealClock(),
+		state:        "closed",
+	}
+}
+
+// NewCircuitBreakerWithClock creates a circuit breaker with a custom clock for testing
+func NewCircuitBreakerWithClock(maxFailures int, resetTimeout time.Duration, clock Clock) *CircuitBreaker {
+	return &CircuitBreaker{
+		maxFailures:  maxFailures,
+		resetTimeout: resetTimeout,
+		clock:        clock,
 		state:        "closed",
 	}
 }
@@ -44,7 +56,7 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 
 	// Check if circuit is open
 	if cb.state == "open" {
-		timeSinceFail := time.Since(cb.lastFailTime)
+		timeSinceFail := cb.clock.Since(cb.lastFailTime)
 		if timeSinceFail > cb.resetTimeout {
 			// Transition to half-open state
 			slog.Debug("Circuit breaker transitioning to half-open",
@@ -64,7 +76,7 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 
 	if err != nil {
 		cb.failures++
-		cb.lastFailTime = time.Now()
+		cb.lastFailTime = cb.clock.Now()
 
 		if cb.failures >= cb.maxFailures {
 			previousState := cb.state
