@@ -21,7 +21,7 @@ spec:
       serviceAccountName: azure-keyvault-sync-controller
       containers:
         - name: controller
-          image: ghcr.io/jeanhaley32/azure-keyvault-sync-controller:latest
+          image: ghcr.io/jeanhaley32/azure-keyvault-sync-controller:v2.1.0
           imagePullPolicy: Always
           env:
             # WATCH_NAMESPACE: Auto-populated from pod's namespace
