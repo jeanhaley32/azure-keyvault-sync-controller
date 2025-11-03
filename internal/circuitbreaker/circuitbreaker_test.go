@@ -80,18 +80,19 @@ func TestCircuitBreaker_OpenAfterMaxFailures(t *testing.T) {
 func TestCircuitBreaker_HalfOpenAfterTimeout(t *testing.T) {
 	maxFailures := 3
 	resetTimeout := 100 * time.Millisecond
-	cb := NewCircuitBreaker(maxFailures, resetTimeout)
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreakerWithClock(maxFailures, resetTimeout, clock)
 
 	// Open the circuit
-    for i := 0; i < maxFailures; i++ {
-        _ = cb.Call(func() error {
+	for i := 0; i < maxFailures; i++ {
+		_ = cb.Call(func() error {
 			return errors.New("fail")
 		})
 	}
 	assert.Equal(t, "open", cb.State())
 
-	// Wait for reset timeout
-	time.Sleep(resetTimeout + 10*time.Millisecond)
+	// Advance time past reset timeout
+	clock.Advance(resetTimeout + 10*time.Millisecond)
 
 	// Next call should transition to half-open
 	functionCalled := false
@@ -109,18 +110,19 @@ func TestCircuitBreaker_HalfOpenAfterTimeout(t *testing.T) {
 func TestCircuitBreaker_HalfOpenToOpen(t *testing.T) {
 	maxFailures := 2
 	resetTimeout := 50 * time.Millisecond
-	cb := NewCircuitBreaker(maxFailures, resetTimeout)
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreakerWithClock(maxFailures, resetTimeout, clock)
 
 	// Open the circuit
-    for i := 0; i < maxFailures; i++ {
-        _ = cb.Call(func() error {
+	for i := 0; i < maxFailures; i++ {
+		_ = cb.Call(func() error {
 			return errors.New("fail")
 		})
 	}
 	assert.Equal(t, "open", cb.State())
 
-	// Wait for reset timeout
-	time.Sleep(resetTimeout + 10*time.Millisecond)
+	// Advance time past reset timeout
+	clock.Advance(resetTimeout + 10*time.Millisecond)
 
 	// Try to call but fail multiple times - need maxFailures to reopen
 	for i := 0; i < maxFailures; i++ {
@@ -298,16 +300,17 @@ func TestCircuitBreaker_RaceCondition(t *testing.T) {
 func TestCircuitBreaker_MultipleHalfOpenAttempts(t *testing.T) {
 	maxFailures := 2
 	resetTimeout := 50 * time.Millisecond
-	cb := NewCircuitBreaker(maxFailures, resetTimeout)
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreakerWithClock(maxFailures, resetTimeout, clock)
 
 	// Open the circuit
 	for i := 0; i < maxFailures; i++ {
-        _ = cb.Call(func() error { return errors.New("fail") })
+		_ = cb.Call(func() error { return errors.New("fail") })
 	}
 	assert.Equal(t, "open", cb.State())
 
 	// First half-open attempts fail (need maxFailures to reopen)
-	time.Sleep(resetTimeout + 10*time.Millisecond)
+	clock.Advance(resetTimeout + 10*time.Millisecond)
 	for i := 0; i < maxFailures; i++ {
 		err := cb.Call(func() error {
 			return errors.New("still failing")
@@ -317,7 +320,7 @@ func TestCircuitBreaker_MultipleHalfOpenAttempts(t *testing.T) {
 	assert.Equal(t, "open", cb.State())
 
 	// Second half-open attempt succeeds
-	time.Sleep(resetTimeout + 10*time.Millisecond)
+	clock.Advance(resetTimeout + 10*time.Millisecond)
 	err := cb.Call(func() error {
 		return nil
 	})
@@ -326,32 +329,34 @@ func TestCircuitBreaker_MultipleHalfOpenAttempts(t *testing.T) {
 }
 
 func TestCircuitBreaker_StateTransitions(t *testing.T) {
-	cb := NewCircuitBreaker(2, 100*time.Millisecond)
+	resetTimeout := 100 * time.Millisecond
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreakerWithClock(2, resetTimeout, clock)
 
 	// Start: closed
 	assert.Equal(t, "closed", cb.State())
 
 	// closed → closed (success)
-    _ = cb.Call(func() error { return nil })
+	_ = cb.Call(func() error { return nil })
 	assert.Equal(t, "closed", cb.State())
 
 	// closed → closed (first failure)
-    _ = cb.Call(func() error { return errors.New("fail 1") })
+	_ = cb.Call(func() error { return errors.New("fail 1") })
 	assert.Equal(t, "closed", cb.State())
 
 	// closed → open (second failure)
-    _ = cb.Call(func() error { return errors.New("fail 2") })
+	_ = cb.Call(func() error { return errors.New("fail 2") })
 	assert.Equal(t, "open", cb.State())
 
 	// open → open (fast fail before timeout)
-    _ = cb.Call(func() error { return nil })
+	_ = cb.Call(func() error { return nil })
 	assert.Equal(t, "open", cb.State())
 
-	// Wait for timeout
-	time.Sleep(150 * time.Millisecond)
+	// Advance time past timeout
+	clock.Advance(150 * time.Millisecond)
 
 	// open → half-open → closed (success after timeout)
-    _ = cb.Call(func() error { return nil })
+	_ = cb.Call(func() error { return nil })
 	assert.Equal(t, "closed", cb.State())
 }
 

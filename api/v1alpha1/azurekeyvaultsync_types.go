@@ -19,10 +19,11 @@ const (
 // AzureKeyVaultSyncSpec defines the desired state of AzureKeyVaultSync
 type AzureKeyVaultSyncSpec struct {
 	// KeyvaultName is the name of the Azure Key Vault to sync secrets from
+	// Must start with a letter, end with letter or digit, 3-24 chars, alphanumeric and hyphens only
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=3
 	// +kubebuilder:validation:MaxLength=24
-	// +kubebuilder:validation:Pattern="^[a-zA-Z0-9-]+$"
+	// +kubebuilder:validation:Pattern="^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$|^[a-zA-Z]{3}$"
 	KeyvaultName string `json:"keyvaultName"`
 
 	// TenantID is the Azure tenant ID (UUID format)

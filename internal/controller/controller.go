@@ -249,12 +249,6 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Kubernetes token",
 		    "namespace", namespace, "serviceAccount", serviceAccount, "clientID", clientID)
 
-	// Debug: Log token length for verification (never log token content)
-	slog.Debug("Kubernetes token acquired",
-		"namespace", namespace,
-		"serviceAccount", serviceAccount,
-		"tokenLength", len(token))
-
 	// Extract tenantID
 	tenantID, ok := obj.Spec.Parameters["tenantId"]
 	if !ok {
@@ -276,12 +270,6 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 
 	slog.Info("Obtained Azure AD token",
 		    "namespace", namespace, "serviceAccount", serviceAccount)
-
-	// Debug: Log token length for verification (never log token content)
-	slog.Debug("Azure AD token acquired",
-		"namespace", namespace,
-		"serviceAccount", serviceAccount,
-		"tokenLength", len(azureToken))
 
 	// Extract vault name
 	keyvaultName, ok := obj.Spec.Parameters["keyvaultName"]
