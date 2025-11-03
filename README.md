@@ -136,9 +136,13 @@ Before installing, ensure your cluster meets these requirements:
 kubectl get csidriver secrets-store.csi.k8s.io
 # Should return: secrets-store.csi.k8s.io
 
-# Check Azure Workload Identity is installed
-kubectl get mutatingwebhookconfigurations azure-wi-webhook-mutating-webhook-configuration
+# Check Azure Workload Identity webhook is installed
+kubectl get mutatingwebhookconfiguration azure-wi-webhook-mutating-webhook-configuration
 # Should return the webhook configuration
+
+# Check Azure Workload Identity webhook pods are running
+kubectl get pods -n azure-workload-identity-system
+# Should show running webhook pods
 
 # Verify you have access to your Azure Key Vault
 az keyvault show --name <your-vault-name>
