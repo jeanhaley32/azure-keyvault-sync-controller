@@ -27,6 +27,7 @@ import (
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcclient "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -248,16 +249,11 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Kubernetes token",
 		    "namespace", namespace, "serviceAccount", serviceAccount, "clientID", clientID)
 
-	// Debug: Print token snippet (with length check to prevent panic)
-	var tokenSnippet string
-	if len(token) >= 10 {
-		tokenSnippet = fmt.Sprintf("%s...%s", token[:5], token[len(token)-5:])
-	} else if len(token) > 0 {
-		tokenSnippet = token[:min(len(token), 5)] + "..."
-	} else {
-		tokenSnippet = "<empty>"
-	}
-	slog.Debug("Kubernetes token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", tokenSnippet)
+	// Debug: Log token length for verification (never log token content)
+	slog.Debug("Kubernetes token acquired",
+		"namespace", namespace,
+		"serviceAccount", serviceAccount,
+		"tokenLength", len(token))
 
 	// Extract tenantID
 	tenantID, ok := obj.Spec.Parameters["tenantId"]
@@ -281,16 +277,11 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	slog.Info("Obtained Azure AD token",
 		    "namespace", namespace, "serviceAccount", serviceAccount)
 
-	// Debug: Print Azure token snippet (with length check to prevent panic)
-	var azureTokenSnippet string
-	if len(azureToken) >= 20 {
-		azureTokenSnippet = fmt.Sprintf("%s...%s", azureToken[:10], azureToken[len(azureToken)-10:])
-	} else if len(azureToken) > 0 {
-		azureTokenSnippet = azureToken[:min(len(azureToken), 10)] + "..."
-	} else {
-		azureTokenSnippet = "<empty>"
-	}
-	slog.Debug("Azure AD token acquired", "namespace", namespace, "serviceAccount", serviceAccount, "tokenSnippet", azureTokenSnippet)
+	// Debug: Log token length for verification (never log token content)
+	slog.Debug("Azure AD token acquired",
+		"namespace", namespace,
+		"serviceAccount", serviceAccount,
+		"tokenLength", len(azureToken))
 
 	// Extract vault name
 	keyvaultName, ok := obj.Spec.Parameters["keyvaultName"]
@@ -886,9 +877,15 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	// Add objects array to parameters as YAML/JSON
 	// The CSI driver expects this as a YAML string
 	if len(objects) > 0 {
-		// For now, we'll build a simple array string
-		// In production, this should be proper YAML marshaling
-		spc.Spec.Parameters["objects"] = buildObjectsArrayString(objects)
+		objectsYAML, err := buildObjectsArrayString(objects)
+		if err != nil {
+			slog.Error("Failed to marshal objects array to YAML",
+				"namespace", akv.Namespace,
+				"name", akv.Name,
+				"error", err)
+			return nil
+		}
+		spc.Spec.Parameters["objects"] = objectsYAML
 	}
 
 	// Generate secretObjects based on vault tags (secret-object=true)
@@ -935,19 +932,20 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	return spc
 }
 
-// buildObjectsArrayString builds the objects array string for SPC parameters
-func buildObjectsArrayString(objects []map[string]interface{}) string {
-	// This is a simplified version - in production use proper YAML marshaling
-	result := "array:\n"
-	for _, obj := range objects {
-		result += "  - |\n"
-		result += fmt.Sprintf("    objectName: %s\n", obj["objectName"])
-		result += fmt.Sprintf("    objectType: %s\n", obj["objectType"])
-		if alias, exists := obj["objectAlias"]; exists {
-			result += fmt.Sprintf("    objectAlias: %s\n", alias)
-		}
+// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling
+func buildObjectsArrayString(objects []map[string]interface{}) (string, error) {
+	// Wrap the objects array in a map with "array" key as expected by the CSI driver
+	wrapper := map[string]interface{}{
+		"array": objects,
 	}
-	return result
+
+	// Marshal to YAML using safe library to prevent injection vulnerabilities
+	yamlBytes, err := yaml.Marshal(wrapper)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal objects array to YAML: %w", err)
+	}
+
+	return string(yamlBytes), nil
 }
 
 // compareSecretObjects compares two SecretObject slices for equality
@@ -1400,7 +1398,18 @@ func (ctrl *Controller) findSPCForSecret(ctx context.Context, secret *corev1.Sec
 		}
 	}
 
-	// Fallback: Search for SPC with matching secretObjects
+	// Use cache index for O(1) lookup
+	spcName := ctrl.cache.FindSPCForSecret(secret.Namespace, secret.Name)
+	if spcName != "" {
+		return spcName, nil
+	}
+
+	// Final fallback: Search for SPC with matching secretObjects
+	// This should rarely be needed if the cache is properly maintained
+	slog.Debug("Cache miss for secret lookup, falling back to API list",
+		"namespace", secret.Namespace,
+		"secretName", secret.Name)
+
 	spcList, err := ctrl.client.SecretsstoreV1().SecretProviderClasses(secret.Namespace).List(
 		ctx,
 		metav1.ListOptions{},

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
@@ -261,11 +262,29 @@ func TestBuildObjectsArrayString(t *testing.T) {
 				"objectAlias: secret2",
 			},
 		},
+		{
+			name: "special characters are properly escaped",
+			objects: []map[string]interface{}{
+				{
+					"objectName": "secret-with-special: chars\nand newlines",
+					"objectType": "secret",
+				},
+			},
+			expectedContains: []string{
+				"array:",
+				"objectName:",
+				"objectType: secret",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildObjectsArrayString(tt.objects)
+			result, err := buildObjectsArrayString(tt.objects)
+
+			// Verify no error occurred
+			assert.NoError(t, err)
+			assert.NotEmpty(t, result)
 
 			// Verify it starts with array marker
 			assert.Contains(t, result, "array:")
@@ -274,6 +293,95 @@ func TestBuildObjectsArrayString(t *testing.T) {
 			for _, expected := range tt.expectedContains {
 				assert.Contains(t, result, expected)
 			}
+		})
+	}
+}
+
+// TestBuildObjectsArrayStringInjectionPrevention tests that YAML injection is prevented
+func TestBuildObjectsArrayStringInjectionPrevention(t *testing.T) {
+	tests := []struct {
+		name         string
+		objects      []map[string]interface{}
+		mustContain  []string
+		description  string
+	}{
+		{
+			name: "newline injection attempt is safely escaped",
+			objects: []map[string]interface{}{
+				{
+					"objectName": "malicious\ninjection: true\nobjectName: real",
+					"objectType": "secret",
+				},
+			},
+			mustContain: []string{
+				"array:",
+				"objectType: secret",
+				// The injected content should be in a literal block (|-) not as separate fields
+				"objectName: |-",
+			},
+			description: "Newlines in objectName should be in a literal block, not create new YAML fields",
+		},
+		{
+			name: "colon injection attempt is safely quoted",
+			objects: []map[string]interface{}{
+				{
+					"objectName": "malicious: injected-value",
+					"objectType": "secret",
+				},
+			},
+			mustContain: []string{
+				"array:",
+				"objectType: secret",
+				// Colons in values should be quoted or in a literal block
+				"objectName:",
+			},
+			description: "Colons should be properly quoted/escaped",
+		},
+		{
+			name: "multi-line injection with indentation",
+			objects: []map[string]interface{}{
+				{
+					"objectName": "test\n    newField: malicious\n    anotherField: injection",
+					"objectType": "secret",
+				},
+			},
+			mustContain: []string{
+				"array:",
+				"objectType: secret",
+				"objectName: |-",
+			},
+			description: "Indentation injection should be contained in literal block",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := buildObjectsArrayString(tt.objects)
+
+			// Should not error
+			assert.NoError(t, err, tt.description)
+
+			// Should produce valid YAML
+			assert.NotEmpty(t, result)
+
+			// Verify expected safe patterns are present
+			for _, expected := range tt.mustContain {
+				assert.Contains(t, result, expected, tt.description)
+			}
+
+			// Verify the structure: objectType should be a sibling to objectName, not nested
+			// Count the number of times "objectType: secret" appears at the correct indentation
+			// It should appear exactly once per object, at the correct level
+			lines := strings.Split(result, "\n")
+			objectTypeCount := 0
+			for _, line := range lines {
+				// objectType should be indented with 2 spaces (array item level)
+				if strings.TrimSpace(line) == "objectType: secret" && strings.HasPrefix(line, "  ") {
+					objectTypeCount++
+				}
+			}
+			assert.Equal(t, len(tt.objects), objectTypeCount,
+				"objectType should appear once per object at correct indentation level")
 		})
 	}
 }

@@ -398,3 +398,193 @@ func createTestObject(namespace, name string) *secretsstorev1.SecretProviderClas
 		},
 	}
 }
+
+// Helper function to create test objects with secret objects
+func createTestObjectWithSecrets(namespace, name string, secretNames ...string) *secretsstorev1.SecretProviderClass {
+	secretObjects := make([]*secretsstorev1.SecretObject, len(secretNames))
+	for i, secretName := range secretNames {
+		secretObjects[i] = &secretsstorev1.SecretObject{
+			SecretName: secretName,
+		}
+	}
+
+	return &secretsstorev1.SecretProviderClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+		},
+		Spec: secretsstorev1.SecretProviderClassSpec{
+			Provider:      "azure",
+			SecretObjects: secretObjects,
+		},
+	}
+}
+
+// Tests for FindSPCForSecret functionality
+
+func TestCache_FindSPCForSecret_NotFound(t *testing.T) {
+	cache := NewCache()
+
+	// Query for non-existent secret
+	spcName := cache.FindSPCForSecret("default", "nonexistent-secret")
+	assert.Empty(t, spcName)
+}
+
+func TestCache_FindSPCForSecret_SingleSPC(t *testing.T) {
+	cache := NewCache()
+
+	// Add SPC with secret objects
+	spc := createTestObjectWithSecrets("default", "my-spc", "secret1", "secret2")
+	cache.Set("default", "my-spc", spc)
+
+	// Should find both secrets
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret1"))
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret2"))
+
+	// Should not find non-existent secret
+	assert.Empty(t, cache.FindSPCForSecret("default", "secret3"))
+}
+
+func TestCache_FindSPCForSecret_MultipleSPCs(t *testing.T) {
+	cache := NewCache()
+
+	// Add multiple SPCs with different secrets
+	spc1 := createTestObjectWithSecrets("default", "spc1", "secret1", "secret2")
+	spc2 := createTestObjectWithSecrets("default", "spc2", "secret3", "secret4")
+	cache.Set("default", "spc1", spc1)
+	cache.Set("default", "spc2", spc2)
+
+	// Each secret should map to its correct SPC
+	assert.Equal(t, "spc1", cache.FindSPCForSecret("default", "secret1"))
+	assert.Equal(t, "spc1", cache.FindSPCForSecret("default", "secret2"))
+	assert.Equal(t, "spc2", cache.FindSPCForSecret("default", "secret3"))
+	assert.Equal(t, "spc2", cache.FindSPCForSecret("default", "secret4"))
+}
+
+func TestCache_FindSPCForSecret_DifferentNamespaces(t *testing.T) {
+	cache := NewCache()
+
+	// Same secret name in different namespaces
+	spc1 := createTestObjectWithSecrets("namespace1", "spc1", "shared-secret")
+	spc2 := createTestObjectWithSecrets("namespace2", "spc2", "shared-secret")
+	cache.Set("namespace1", "spc1", spc1)
+	cache.Set("namespace2", "spc2", spc2)
+
+	// Should find correct SPC for each namespace
+	assert.Equal(t, "spc1", cache.FindSPCForSecret("namespace1", "shared-secret"))
+	assert.Equal(t, "spc2", cache.FindSPCForSecret("namespace2", "shared-secret"))
+
+	// Should not find in wrong namespace
+	assert.Empty(t, cache.FindSPCForSecret("namespace3", "shared-secret"))
+}
+
+func TestCache_FindSPCForSecret_UpdateSPC(t *testing.T) {
+	cache := NewCache()
+
+	// Add SPC with initial secrets
+	spc := createTestObjectWithSecrets("default", "my-spc", "secret1", "secret2")
+	cache.Set("default", "my-spc", spc)
+
+	// Verify initial mappings
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret1"))
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret2"))
+
+	// Update SPC with different secrets
+	spcUpdated := createTestObjectWithSecrets("default", "my-spc", "secret3", "secret4")
+	cache.Set("default", "my-spc", spcUpdated)
+
+	// Old secrets should no longer be found
+	assert.Empty(t, cache.FindSPCForSecret("default", "secret1"))
+	assert.Empty(t, cache.FindSPCForSecret("default", "secret2"))
+
+	// New secrets should be found
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret3"))
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret4"))
+}
+
+func TestCache_FindSPCForSecret_DeleteSPC(t *testing.T) {
+	cache := NewCache()
+
+	// Add SPC with secrets
+	spc := createTestObjectWithSecrets("default", "my-spc", "secret1", "secret2")
+	cache.Set("default", "my-spc", spc)
+
+	// Verify mappings exist
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret1"))
+	assert.Equal(t, "my-spc", cache.FindSPCForSecret("default", "secret2"))
+
+	// Delete SPC
+	cache.Delete("default", "my-spc")
+
+	// Secrets should no longer be found
+	assert.Empty(t, cache.FindSPCForSecret("default", "secret1"))
+	assert.Empty(t, cache.FindSPCForSecret("default", "secret2"))
+}
+
+func TestCache_FindSPCForSecret_EmptySecretObjects(t *testing.T) {
+	cache := NewCache()
+
+	// Add SPC with no secret objects
+	spc := createTestObjectWithSecrets("default", "my-spc")
+	cache.Set("default", "my-spc", spc)
+
+	// Should not find any secrets
+	assert.Empty(t, cache.FindSPCForSecret("default", "any-secret"))
+}
+
+func TestCache_FindSPCForSecret_ConcurrentAccess(t *testing.T) {
+	cache := NewCache()
+	var wg sync.WaitGroup
+
+	// Add initial SPCs
+	for i := 0; i < 10; i++ {
+		spc := createTestObjectWithSecrets("default", string(rune('a'+i)), string(rune('A'+i)))
+		cache.Set("default", string(rune('a'+i)), spc)
+	}
+
+	// Concurrent readers
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			secretName := string(rune('A' + (id % 10)))
+			spcName := cache.FindSPCForSecret("default", secretName)
+			// Should find the corresponding SPC
+			if spcName != "" {
+				assert.Equal(t, string(rune('a'+(id%10))), spcName)
+			}
+		}(i)
+	}
+
+	// Concurrent writers (updates)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			spcName := string(rune('a' + (id % 10)))
+			secretName := string(rune('A' + (id % 10)))
+			spc := createTestObjectWithSecrets("default", spcName, secretName)
+			cache.Set("default", spcName, spc)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify cache is still consistent
+	for i := 0; i < 10; i++ {
+		spcName := string(rune('a' + i))
+		secretName := string(rune('A' + i))
+		found := cache.FindSPCForSecret("default", secretName)
+		assert.Equal(t, spcName, found)
+	}
+}
+
+func TestCache_FindSPCForSecret_AfterInitialization(t *testing.T) {
+	cache := NewCache()
+
+	// Query immediately after initialization (empty cache)
+	assert.Empty(t, cache.FindSPCForSecret("default", "secret"))
+
+	// Verify secretToSPC map is initialized
+	assert.NotNil(t, cache.secretToSPC)
+}
