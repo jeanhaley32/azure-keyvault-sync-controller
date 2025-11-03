@@ -708,7 +708,10 @@ func TestStartCleanup(t *testing.T) {
 	go ac.StartCleanup(ctx, 200*time.Millisecond)
 
 	// Initially should have 2 tokens
-	assert.Equal(t, 2, len(ac.tokens))
+	ac.mu.RLock()
+	initialCount := len(ac.tokens)
+	ac.mu.RUnlock()
+	assert.Equal(t, 2, initialCount)
 
 	// Wait for first token to expire and cleanup to run
 	time.Sleep(400 * time.Millisecond)
