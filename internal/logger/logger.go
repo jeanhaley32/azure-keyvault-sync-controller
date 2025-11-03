@@ -8,7 +8,10 @@ import (
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/config"
 )
 
-var logger *slog.Logger
+var (
+	logger  *slog.Logger
+	handler slog.Handler
+)
 
 // InitLogger initializes the global structured logger
 func InitLogger(cfg *config.Config) {
@@ -17,8 +20,6 @@ func InitLogger(cfg *config.Config) {
 
 	// Get log format from configuration
 	logFormat := strings.ToLower(cfg.LogFormat)
-
-	var handler slog.Handler
 
 	if logFormat == "json" {
 		// JSON format for production
@@ -62,4 +63,12 @@ func Logger() *slog.Logger {
 		panic("logger not initialized - call InitLogger first")
 	}
 	return logger
+}
+
+// Handler returns the slog handler for bridging to other logging frameworks
+func Handler() slog.Handler {
+	if handler == nil {
+		panic("logger not initialized - call InitLogger first")
+	}
+	return handler
 }

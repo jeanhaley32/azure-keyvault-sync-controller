@@ -15,6 +15,7 @@ import (
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/controller"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/health"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/logger"
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -37,6 +38,9 @@ func main() {
 
 	// Initialize structured logger with configuration
 	logger.InitLogger(cfg)
+
+	// Bridge slog to controller-runtime's logr
+	ctrl.SetLogger(logr.FromSlogHandler(logger.Handler()))
 
 	slog.Info("Starting Azure Key Vault Sync Controller")
 	slog.Info("Configuration loaded",
