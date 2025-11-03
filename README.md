@@ -1,6 +1,8 @@
 # Azure Key Vault Sync Controller
 
-A production-ready Kubernetes controller that automatically synchronizes Azure Key Vault contents to SecretProviderClass objects using Azure Workload Identity federation.
+Manages SecretProviderClass resources based on Azure Key Vault tags instead of static YAML configuration. The vault becomes the source of truth for which secrets should be synced and how they should be exposed in Kubernetes.
+
+Built for environments using Azure Key Vault with the Secrets Store CSI Driver.
 
 ## Who Should Use This
 
