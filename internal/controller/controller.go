@@ -910,7 +910,7 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	}
 
 	if len(spcAnnotations) > 0 {
-		spc.ObjectMeta.Annotations = spcAnnotations
+		spc.Annotations = spcAnnotations
 		slog.Info("Collected annotations and labels from vault tags for CRD-based SPC",
 			"namespace", akv.Namespace,
 			"name", akv.Name,
@@ -1108,7 +1108,7 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 		// SPC exists, check if update is needed
 		objectsChanged := existingSPC.Spec.Parameters["objects"] != desiredSPC.Spec.Parameters["objects"]
 		secretObjectsChanged := !compareSecretObjects(existingSPC.Spec.SecretObjects, desiredSPC.Spec.SecretObjects)
-		annotationsChanged := !compareAnnotations(existingSPC.ObjectMeta.Annotations, desiredSPC.ObjectMeta.Annotations)
+		annotationsChanged := !compareAnnotations(existingSPC.Annotations, desiredSPC.Annotations)
 
 		if !objectsChanged && !secretObjectsChanged && !annotationsChanged {
 			slog.Info("No changes detected - skipping SPC update",
@@ -1124,7 +1124,7 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 
 			// Update the spec and annotations
 			existingSPC.Spec = desiredSPC.Spec
-			existingSPC.ObjectMeta.Annotations = desiredSPC.ObjectMeta.Annotations
+			existingSPC.Annotations = desiredSPC.Annotations
 			existingSPC.OwnerReferences = desiredSPC.OwnerReferences
 
 			_, updateErr := ctrl.client.SecretsstoreV1().SecretProviderClasses(namespace).Update(
