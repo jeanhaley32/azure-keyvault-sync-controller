@@ -125,37 +125,34 @@ You must have the Azure Secrets Store CSI Driver infrastructure already set up:
 
 ## Quick Start
 
-Get the controller running in 4 steps:
+This controller assumes you have a working Azure Secrets Store CSI Driver setup with Workload Identity authentication.
 
-### Step 1: Verify Prerequisites
+### Prerequisites
 
-Before installing, ensure your cluster meets these requirements:
+You must complete the Azure infrastructure configuration before installing this controller.
 
+**Required Azure Configuration:**
+
+Follow Microsoft's official documentation to set up:
+1. **[Azure Key Vault Provider for Secrets Store CSI Driver](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-driver)** - Install and configure the CSI Driver
+2. **[Configure Workload Identity for CSI Driver](https://learn.microsoft.com/en-us/azure/aks/csi-secrets-store-identity-access)** - Set up ServiceAccount authentication with federated credentials
+3. **[Azure Workload Identity](https://azure.github.io/azure-workload-identity/docs/introduction.html)** - Understand the authentication model
+
+**What you need before proceeding:**
+- Kubernetes ServiceAccount with federated credential to User-Assigned Managed Identity
+- User-Assigned Managed Identity with Key Vault RBAC permissions:
+  - `Key Vault Secrets User` role (for secrets)
+  - `Key Vault Certificates User` role (for certificates)
+- A working SecretProviderClass that successfully mounts secrets via CSI Driver
+
+**Verify your setup works:**
 ```bash
-# Check CSI Driver is installed
-kubectl get csidriver secrets-store.csi.k8s.io
-# Should return: secrets-store.csi.k8s.io
-
-# Check Azure Workload Identity webhook is installed
-kubectl get mutatingwebhookconfiguration azure-wi-webhook-mutating-webhook-configuration
-# Should return the webhook configuration
-
-# Check Azure Workload Identity webhook pods are running
-kubectl get pods -n azure-workload-identity-system
-# Should show running webhook pods
-
-# Verify you have access to your Azure Key Vault
-az keyvault show --name <your-vault-name>
+# You should be able to create a test pod that mounts secrets from your vault
+# using the CSI Driver and Workload Identity - if this works, you're ready
+# to install this controller
 ```
 
-**Required Azure Setup:**
-- ✅ Secrets Store CSI Driver installed in cluster ([install guide](https://secrets-store-csi-driver.sigs.k8s.io/getting-started/installation.html))
-- ✅ Azure Workload Identity enabled ([install guide](https://azure.github.io/azure-workload-identity/docs/installation.html))
-- ✅ Azure Key Vault with secrets/certificates
-- ✅ Managed Identity with Key Vault RBAC permissions (Get Secrets, List Secrets, Get Certificates, List Certificates)
-- ✅ Federated Identity Credential linking Kubernetes ServiceAccount to Managed Identity
-
-### Step 2: Choose Deployment Model
+### Step 1: Choose Deployment Model
 
 | Model | Use When | Security Posture |
 |-------|----------|------------------|
@@ -198,7 +195,7 @@ kubectl get pods -n kube-system -l app=azure-keyvault-sync-controller
 
 </details>
 
-### Step 3: Create Your First Managed SecretProviderClass
+### Step 2: Create Your First Managed SecretProviderClass
 
 Create a SecretProviderClass with the automatic sync annotation:
 
@@ -236,7 +233,7 @@ kubectl get spc my-app-secrets -w
 4. Lists all secrets/certificates from `prod-myapp-vault`
 5. Automatically populates the `objects` array with vault contents
 
-### Step 4: Verify Synchronization
+### Step 3: Verify Synchronization
 
 Check that synchronization completed successfully:
 
