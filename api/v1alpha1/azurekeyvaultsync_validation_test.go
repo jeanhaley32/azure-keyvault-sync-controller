@@ -72,14 +72,20 @@ func TestAzureKeyVaultSyncSpec_InvalidKeyvaultName(t *testing.T) {
 		{
 			name:          "Starts with hyphen",
 			keyvaultName:  "-myvault",
-			shouldBeValid: true, // Azure allows this
-			reason:        "Starting with hyphen is allowed",
+			shouldBeValid: false,
+			reason:        "Must start with a letter per Azure rules",
 		},
 		{
 			name:          "Ends with hyphen",
 			keyvaultName:  "myvault-",
-			shouldBeValid: true, // Azure allows this
-			reason:        "Ending with hyphen is allowed",
+			shouldBeValid: false,
+			reason:        "Must end with letter or digit per Azure rules",
+		},
+		{
+			name:          "Starts with number",
+			keyvaultName:  "1myvault",
+			shouldBeValid: false,
+			reason:        "Must start with a letter per Azure rules",
 		},
 	}
 

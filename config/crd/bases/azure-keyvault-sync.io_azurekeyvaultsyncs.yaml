@@ -82,11 +82,12 @@ spec:
                   If specified, only secrets matching ALL filter tags are synced.
                 type: object
               keyvaultName:
-                description: KeyvaultName is the name of the Azure Key Vault to sync
-                  secrets from
+                description: |-
+                  KeyvaultName is the name of the Azure Key Vault to sync secrets from
+                  Must start with a letter, end with letter or digit, 3-24 chars, alphanumeric and hyphens only
                 maxLength: 24
                 minLength: 3
-                pattern: ^[a-zA-Z0-9-]+$
+                pattern: ^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$|^[a-zA-Z]{3}$
                 type: string
               serviceAccount:
                 description: ServiceAccount is the Kubernetes ServiceAccount name
