@@ -40,6 +40,10 @@ const (
 	// Label keys for service/environment filtering (multi-tenant vaults)
 	labelService     = "service"
 	labelEnvironment = "environment"
+
+	// AzureKeyVaultSync CRD type identifiers used in owner reference checks
+	azureKeyVaultSyncAPIVersion = "keyvault.azure.com/v1alpha1"
+	azureKeyVaultSyncKind       = "AzureKeyVaultSync"
 )
 
 // QueueKey represents a namespaced resource name for the work queue
@@ -214,8 +218,8 @@ func (ctrl *Controller) handleOwnedSPCDeletion(obj *secretsstorev1.SecretProvide
 	// Check each owner reference for AzureKeyVaultSync CRD ownership
 	for _, ownerRef := range obj.OwnerReferences {
 		// Only process the first controlling owner reference matching our CRD type
-		if ownerRef.APIVersion != "keyvault.azure.com/v1alpha1" ||
-			ownerRef.Kind != "AzureKeyVaultSync" ||
+		if ownerRef.APIVersion != azureKeyVaultSyncAPIVersion ||
+			ownerRef.Kind != azureKeyVaultSyncKind ||
 			ownerRef.Controller == nil || !*ownerRef.Controller {
 			continue
 		}
@@ -225,6 +229,14 @@ func (ctrl *Controller) handleOwnedSPCDeletion(obj *secretsstorev1.SecretProvide
 			"spc", name,
 			"owner", ownerRef.Name,
 			"ownerUID", ownerRef.UID)
+
+		// Defensive check: ensure workqueue is initialized
+		if ctrl.queue == nil {
+			slog.Error("workqueue is nil, cannot enqueue owner",
+				"namespace", namespace,
+				"owner", ownerRef.Name)
+			return
+		}
 
 		// Enqueue the owner CRD for reconciliation using the workqueue pattern.
 		// This provides:
