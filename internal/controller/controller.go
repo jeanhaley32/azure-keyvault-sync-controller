@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -18,7 +19,7 @@ import (
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/token"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/update"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
@@ -285,8 +286,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		return listErr
 	})
 	if err != nil {
-		if err.Error() == "circuit breaker is open" ||
-		   strings.Contains(err.Error(), "circuit breaker is open") {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
 				"vault", keyvaultName,
 				"namespace", namespace,
@@ -309,8 +309,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		return listErr
 	})
 	if err != nil {
-		if err.Error() == "circuit breaker is open" ||
-		   strings.Contains(err.Error(), "circuit breaker is open") {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 			slog.Warn("Azure circuit breaker open, skipping vault certificates call",
 				"vault", keyvaultName,
 				"namespace", namespace,
@@ -717,7 +716,7 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 		ctx, name, metav1.GetOptions{},
 	)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			// Resource deleted, remove from cache
 			slog.Info("Resource not found, removing from cache", "namespace", namespace, "name", name)
 			ctrl.cache.Delete(namespace, name)
@@ -1005,7 +1004,7 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 		return listErr
 	})
 	if err != nil {
-		if err.Error() == "circuit breaker is open" || strings.Contains(err.Error(), "circuit breaker is open") {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
 				"vault", akv.Spec.KeyvaultName,
 				"namespace", namespace,
@@ -1039,7 +1038,7 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 	}, existingSPC)
 
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			// SPC doesn't exist, create it
 			slog.Info("Creating SecretProviderClass",
 				"namespace", namespace,
