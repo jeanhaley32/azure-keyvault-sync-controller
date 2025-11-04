@@ -40,12 +40,6 @@ const (
 	// Label keys for service/environment filtering (multi-tenant vaults)
 	labelService     = "service"
 	labelEnvironment = "environment"
-
-	// Timeout for API calls when fetching owner CRD
-	ownerCRDGetTimeout = 10 * time.Second
-
-	// Timeout for reconcile operations triggered by SPC deletion
-	ownerReconcileTimeout = 10 * time.Second
 )
 
 // QueueKey represents a namespaced resource name for the work queue
@@ -100,9 +94,6 @@ type Controller struct {
 	tokenProvider TokenProvider
 	vaultClient   VaultClient
 	patchClient   PatchClient
-
-	// reconcileFn allows tests to spy on reconciliation calls
-	reconcileFn func(ctx context.Context, akv *akvv1alpha1.AzureKeyVaultSync) error
 }
 
 func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface, ctrlClient client.Client, config *config.Config, watchNamespace string) *Controller {
@@ -125,7 +116,7 @@ func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface
 	vaultClient := NewRealVaultClient()
 	patchClient := NewRealPatchClient(spcClient)
 
-	ctrl := &Controller{
+	return &Controller{
 		client:              spcClient,
 		clientset:           clientset,
 		ctrlClient:          ctrlClient,
@@ -141,12 +132,6 @@ func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface
 		vaultClient:         vaultClient,
 		patchClient:         patchClient,
 	}
-
-	// Initialize reconcileFn to point to the real reconcile method
-	// Tests can override this to spy on reconciliation calls
-	ctrl.reconcileFn = ctrl.reconcileAzureKeyVaultSync
-
-	return ctrl
 }
 
 func (ctrl *Controller) printCache() {
@@ -219,76 +204,41 @@ func (ctrl *Controller) handleDeleted(ctx context.Context, obj *secretsstorev1.S
 }
 
 // handleOwnedSPCDeletion checks if a deleted SPC is owned by an AzureKeyVaultSync CRD
-// and immediately triggers reconciliation to recreate it (unless the CRD was also deleted).
-// This provides fast recovery (1-2s) instead of waiting for periodic sync (up to 5 minutes).
+// and enqueues the owner for immediate reconciliation to recreate the SPC.
+// This provides fast recovery (seconds) instead of waiting for periodic sync (up to 5 minutes).
+// Uses the workqueue pattern for bounded concurrency, deduplication, and rate limiting.
 func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secretsstorev1.SecretProviderClass) {
 	namespace := obj.Namespace
 	name := obj.Name
 
 	// Check each owner reference for AzureKeyVaultSync CRD ownership
 	for _, ownerRef := range obj.OwnerReferences {
+		// Only process the first controlling owner reference matching our CRD type
 		if ownerRef.APIVersion != "keyvault.azure.com/v1alpha1" ||
 			ownerRef.Kind != "AzureKeyVaultSync" ||
 			ownerRef.Controller == nil || !*ownerRef.Controller {
 			continue
 		}
 
-		slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, triggering immediate reconciliation",
+		slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, enqueueing owner for immediate reconciliation",
 			"namespace", namespace,
 			"spc", name,
 			"owner", ownerRef.Name,
 			"ownerUID", ownerRef.UID)
 
-		// Process this owner reference in a scoped function to ensure context cancellation
-		// happens at the end of each iteration, not at function exit
-		func() {
-			// Use timeout context for API call
-			ctxWithTimeout, cancel := context.WithTimeout(ctx, ownerCRDGetTimeout)
-			defer cancel()
+		// Enqueue the owner CRD for reconciliation using the workqueue pattern.
+		// This provides:
+		// - Deduplication: multiple SPC deletions for same owner → single reconcile
+		// - Rate limiting: protects Azure API from overload
+		// - Bounded concurrency: controlled by worker count
+		// - Consistency: uses same reconciliation path as other events
+		ownerKey := keyFor(namespace, ownerRef.Name)
+		ctrl.queue.Add(ownerKey)
 
-			// Fetch the owning AzureKeyVaultSync CRD
-			akv := &akvv1alpha1.AzureKeyVaultSync{}
-			err := ctrl.ctrlClient.Get(ctxWithTimeout, client.ObjectKey{
-				Namespace: namespace,
-				Name:      ownerRef.Name,
-			}, akv)
-
-			if err != nil {
-				if kerrors.IsNotFound(err) {
-					slog.Info("Owner CRD not found (may have been deleted with cascade policy)",
-						"namespace", namespace, "owner", ownerRef.Name)
-				} else {
-					slog.Error("Failed to get owner CRD",
-						"namespace", namespace,
-						"owner", ownerRef.Name,
-						"error", err)
-				}
-				return // Return from func(), allowing loop to continue
-			}
-
-			// Trigger immediate SPC recreation in a goroutine to avoid blocking the event handler.
-			// Using a goroutine ensures the event loop remains responsive even if reconciliation
-			// takes longer than expected. The goroutine derives its context from the parent to
-			// ensure it stops if the controller shuts down, but has its own timeout for the reconcile operation.
-			go func(akv *akvv1alpha1.AzureKeyVaultSync, spcName, spcNamespace string) {
-				reconcileCtx, reconcileCancel := context.WithTimeout(ctx, ownerReconcileTimeout)
-				defer reconcileCancel()
-
-				if err := ctrl.reconcileFn(reconcileCtx, akv); err != nil {
-					slog.Error("Failed to reconcile owner CRD after SPC deletion",
-						"namespace", spcNamespace,
-						"spc", spcName,
-						"owner", akv.Name,
-						"spcUID", obj.UID,
-						"error", err)
-				} else {
-					slog.Info("Successfully recreated SPC after deletion",
-						"namespace", spcNamespace,
-						"spc", spcName,
-						"owner", akv.Name)
-				}
-			}(akv, name, namespace)
-		}()
+		slog.Debug("Enqueued owner CRD for reconciliation",
+			"namespace", namespace,
+			"owner", ownerRef.Name,
+			"queueKey", ownerKey)
 
 		// Successfully processed first controller owner, no need to check others
 		break

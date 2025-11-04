@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/cache"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/circuitbreaker"
@@ -18,12 +17,6 @@ import (
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 )
 
-const (
-	// Timeout for async reconcile tests - generous to prevent CI flakiness
-	// Reconcile happens in goroutine, so we need to wait for async completion
-	reconcileTestTimeout = 1 * time.Second
-)
-
 // Helper function to create a test controller with mocked dependencies
 func newTestController(t *testing.T) (*Controller, *testutil.K8sTestEnvironment) {
 	t.Helper()
@@ -34,7 +27,7 @@ func newTestController(t *testing.T) (*Controller, *testutil.K8sTestEnvironment)
 		AzureCircuitBreakerTimeout:   1 * time.Minute,
 	}
 
-	ctrl := &Controller{
+	return &Controller{
 		client:              env.SPCClient,
 		clientset:           env.KubeClient,
 		ctrlClient:          env.CtrlClient,
@@ -46,13 +39,7 @@ func newTestController(t *testing.T) (*Controller, *testutil.K8sTestEnvironment)
 		config:              cfg,
 		watchNamespace:      "",
 		azureCircuitBreaker: circuitbreaker.NewCircuitBreaker(cfg.AzureCircuitBreakerThreshold, cfg.AzureCircuitBreakerTimeout),
-	}
-
-	// Initialize reconcileFn to point to the real reconcile method by default
-	// Individual tests can override this to spy on reconciliation calls
-	ctrl.reconcileFn = ctrl.reconcileAzureKeyVaultSync
-
-	return ctrl, env
+	}, env
 }
 
 // Helper to drain the queue and return keys
@@ -487,115 +474,93 @@ func TestHandleDeletedWithOwnerReference(t *testing.T) {
 	// the expected behavior for deleted resources and tests cache cleanup works correctly.
 }
 
-// TestHandleOwnedSPCDeletion_ReconcileFnInvocation tests that reconcileFn is called for valid owned SPCs
-func TestHandleOwnedSPCDeletion_ReconcileFnInvocation(t *testing.T) {
+// TestHandleOwnedSPCDeletion_QueueBehavior tests that owner CRD is enqueued for valid owned SPCs
+func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 	tests := []struct {
-		name              string
-		spc               *secretsstorev1.SecretProviderClass
-		setupCRD          bool // Whether to create the AzureKeyVaultSync CRD
-		expectReconcile   bool
+		name           string
+		spc            *secretsstorev1.SecretProviderClass
+		expectEnqueued bool
+		expectedKey    string
 	}{
 		{
-			name: "valid owned SPC triggers reconcile",
+			name: "valid owned SPC enqueues owner CRD",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
 				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				Build(),
-			setupCRD:        true,
-			expectReconcile: true,
+			expectEnqueued: true,
+			expectedKey:    "default/test-akv",
 		},
 		{
-			name: "SPC with no owner references - no reconcile",
+			name: "SPC with no owner references - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
 				Build(),
-			setupCRD:        false,
-			expectReconcile: false,
+			expectEnqueued: false,
 		},
 		{
-			name: "SPC with wrong API version - no reconcile",
+			name: "SPC with wrong API version - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
 				WithOwnerReference("keyvault.azure.com/v1beta1", "AzureKeyVaultSync", "test-akv").
 				Build(),
-			setupCRD:        false,
-			expectReconcile: false,
+			expectEnqueued: false,
 		},
 		{
-			name: "SPC with wrong kind - no reconcile",
+			name: "SPC with wrong kind - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
 				WithOwnerReference("keyvault.azure.com/v1alpha1", "WrongKind", "test-akv").
 				Build(),
-			setupCRD:        false,
-			expectReconcile: false,
+			expectEnqueued: false,
 		},
 		{
-			name: "SPC with controller=false - no reconcile",
+			name: "SPC with controller=false - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
 				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				WithControllerFalse().
 				Build(),
-			setupCRD:        false,
-			expectReconcile: false,
+			expectEnqueued: false,
 		},
 		{
-			name: "SPC with controller=nil - no reconcile",
+			name: "SPC with controller=nil - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
 				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				WithControllerNil().
 				Build(),
-			setupCRD:        false,
-			expectReconcile: false,
+			expectEnqueued: false,
 		},
 		{
-			name: "owned SPC but CRD not found - no reconcile",
-			spc: testutil.NewSecretProviderClass("default", "test-spc").
+			name: "owned SPC in different namespace",
+			spc: testutil.NewSecretProviderClass("kube-system", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "missing-akv").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "system-akv").
 				Build(),
-			setupCRD:        false,
-			expectReconcile: false,
+			expectEnqueued: true,
+			expectedKey:    "kube-system/system-akv",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl, env := newTestController(t)
+			ctrl, _ := newTestController(t)
 			defer ctrl.queue.ShutDown()
-
-			// Channel to signal when reconcile is called
-			reconcileCalled := make(chan bool, 1)
-
-			// Override reconcileFn to spy on calls
-			ctrl.reconcileFn = func(ctx context.Context, akv *akvv1alpha1.AzureKeyVaultSync) error {
-				select {
-				case reconcileCalled <- true:
-				default:
-				}
-				return nil
-			}
-
-			// Setup CRD if needed
-			if tt.setupCRD {
-				akv := testutil.NewAzureKeyVaultSync("default", "test-akv").Build()
-				err := env.CreateAzureKeyVaultSync(akv)
-				assert.NoError(t, err, "failed to create test AzureKeyVaultSync CRD")
-			}
 
 			// Call handleOwnedSPCDeletion
 			ctrl.handleOwnedSPCDeletion(context.Background(), tt.spc)
 
-			// Wait for reconcile call or timeout
-			// Reconcile happens asynchronously in a goroutine, so we use a generous timeout
-			// to prevent false failures on slow CI systems while still catching regressions
-			select {
-			case <-reconcileCalled:
-				assert.True(t, tt.expectReconcile, "reconcile was called but not expected")
-			case <-time.After(reconcileTestTimeout):
-				assert.False(t, tt.expectReconcile, "reconcile was not called but expected")
+			// Check queue state
+			keys := drainQueue(ctrl.queue)
+
+			if tt.expectEnqueued {
+				assert.Len(t, keys, 1, "expected owner CRD to be enqueued")
+				if len(keys) > 0 {
+					assert.Equal(t, QueueKey(tt.expectedKey), keys[0], "enqueued key should match owner CRD namespace/name")
+				}
+			} else {
+				assert.Len(t, keys, 0, "expected nothing to be enqueued")
 			}
 		})
 	}
