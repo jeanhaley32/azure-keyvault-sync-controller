@@ -245,7 +245,7 @@ func (ctrl *Controller) handleOwnedSPCDeletion(obj *secretsstorev1.SecretProvide
 	}
 }
 
-func (ctrl *Controller) handleEvent(ctx context.Context, event watch.Event) {
+func (ctrl *Controller) handleEvent(event watch.Event) {
 	obj, ok := event.Object.(*secretsstorev1.SecretProviderClass)
 	if !ok {
 		slog.Warn("Unexpected object type", "type", fmt.Sprintf("%T", event.Object))
@@ -1600,7 +1600,7 @@ func (ctrl *Controller) Run(ctx context.Context) {
 					// Channel closed, reconnect
 					break watchLoop
 				}
-				ctrl.handleEvent(ctx, event)
+				ctrl.handleEvent(event)
 				ctrl.HealthChecker.UpdateWatchActivity()
 			}
 		}

@@ -425,7 +425,9 @@ func TestHandleOwnedSPCDeletion(t *testing.T) {
 				// For cases where no action should be taken (wrong owner ref, nil controller, etc),
 				// we verify the function completes without panicking. The function should return
 				// early from the loop without attempting reconciliation.
-				assert.True(t, true, "Function should complete without panic for invalid owner refs")
+				// Verify nothing was enqueued
+			keys := drainQueue(ctrl.queue)
+			assert.Len(t, keys, 0, "expected no items enqueued for invalid owner refs")
 			}
 
 			// Note: Full reconciliation verification would require mocking the reconcile call.
