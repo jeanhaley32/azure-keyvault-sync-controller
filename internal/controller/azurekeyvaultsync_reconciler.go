@@ -5,7 +5,7 @@ import (
 	"log/slog"
 
 	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -34,7 +34,7 @@ func (r *AzureKeyVaultSyncReconciler) Reconcile(ctx context.Context, req reconci
 	// Fetch the AzureKeyVaultSync resource
 	akv := &akvv1alpha1.AzureKeyVaultSync{}
 	if err := r.Get(ctx, req.NamespacedName, akv); err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			// Resource deleted - nothing to do (garbage collection handles SPC cleanup via OwnerReferences)
 			slog.Info("AzureKeyVaultSync resource not found - may have been deleted",
 				"namespace", req.Namespace,

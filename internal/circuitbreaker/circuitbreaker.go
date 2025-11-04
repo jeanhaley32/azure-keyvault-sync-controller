@@ -1,11 +1,15 @@
 package circuitbreaker
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 )
+
+// ErrCircuitOpen is returned when the circuit breaker is in open state
+var ErrCircuitOpen = errors.New("circuit breaker is open")
 
 // CircuitBreaker implements the circuit breaker pattern to protect against
 // cascading failures when calling external services (Azure API).
@@ -66,8 +70,8 @@ func (cb *CircuitBreaker) Call(fn func() error) error {
 			cb.failures = 0
 		} else {
 			// Circuit still open, fail fast
-			return fmt.Errorf("circuit breaker is open (will retry in %v)",
-				cb.resetTimeout-timeSinceFail)
+			return fmt.Errorf("%w (will retry in %v)",
+				ErrCircuitOpen, cb.resetTimeout-timeSinceFail)
 		}
 	}
 

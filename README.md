@@ -422,7 +422,7 @@ Phase 6 introduces a two-tier architecture that enables annotation and label syn
 │  Tier 1: Controller Loop (Azure → Kubernetes)                │
 │  ┌────────────┐   ┌──────────────┐   ┌──────────────┐       │
 │  │ Azure Key  │──▶│ Controller   │──▶│ SPC with     │       │
-│  │ Vault Tags │   │ (15 min sync)│   │ Annotations  │       │
+│  │ Vault Tags │   │ (5 min sync) │   │ Annotations  │       │
 │  └────────────┘   └──────────────┘   └──────────────┘       │
 │                                                               │
 │  Tier 2: Secret Watcher Loop (Kubernetes → Kubernetes)       │
@@ -434,10 +434,11 @@ Phase 6 introduces a two-tier architecture that enables annotation and label syn
 ```
 
 **Tier 1 - Controller Loop:**
-- Polls Azure Key Vault (default: 15 minutes)
+- Polls Azure Key Vault (default: 5 minutes, configurable via `SYNC_INTERVAL`)
 - Transforms vault tags to SPC annotations
 - Makes Azure API calls (incurs cost)
 - Updates SecretProviderClass resources
+- Event-driven reconciliation on CRD changes
 
 **Tier 2 - Secret Watcher Loop:**
 - Watches CSI-managed Secrets (30 seconds)

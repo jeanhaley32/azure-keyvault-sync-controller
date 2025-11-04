@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -18,7 +19,7 @@ import (
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/token"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/update"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
@@ -285,8 +286,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		return listErr
 	})
 	if err != nil {
-		if err.Error() == "circuit breaker is open" ||
-		   strings.Contains(err.Error(), "circuit breaker is open") {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
 				"vault", keyvaultName,
 				"namespace", namespace,
@@ -309,8 +309,7 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 		return listErr
 	})
 	if err != nil {
-		if err.Error() == "circuit breaker is open" ||
-		   strings.Contains(err.Error(), "circuit breaker is open") {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 			slog.Warn("Azure circuit breaker open, skipping vault certificates call",
 				"vault", keyvaultName,
 				"namespace", namespace,
@@ -717,7 +716,7 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 		ctx, name, metav1.GetOptions{},
 	)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			// Resource deleted, remove from cache
 			slog.Info("Resource not found, removing from cache", "namespace", namespace, "name", name)
 			ctrl.cache.Delete(namespace, name)
@@ -743,49 +742,6 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 	ctrl.cache.Set(namespace, name, obj.DeepCopy())
 
 	return nil
-}
-
-// watchAzureKeyVaultSync watches AzureKeyVaultSync CRDs and reconciles them
-func (ctrl *Controller) watchAzureKeyVaultSync(ctx context.Context) {
-	slog.Info("Starting AzureKeyVaultSync CRD watcher")
-
-	// Use a ticker for periodic reconciliation
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("AzureKeyVaultSync watcher shutting down")
-			return
-		case <-ticker.C:
-			// List all AzureKeyVaultSync resources
-			var akvList akvv1alpha1.AzureKeyVaultSyncList
-			listOpts := []client.ListOption{}
-
-			// Apply namespace filter if configured
-			if ctrl.watchNamespace != "" {
-				listOpts = append(listOpts, client.InNamespace(ctrl.watchNamespace))
-			}
-
-			if err := ctrl.ctrlClient.List(ctx, &akvList, listOpts...); err != nil {
-				slog.Error("Failed to list AzureKeyVaultSync resources", "error", err)
-				continue
-			}
-
-			slog.Debug("Found AzureKeyVaultSync resources", "count", len(akvList.Items))
-
-			// Reconcile each resource
-			for _, akv := range akvList.Items {
-				if err := ctrl.reconcileAzureKeyVaultSync(ctx, &akv); err != nil {
-					slog.Error("Failed to reconcile AzureKeyVaultSync",
-						"namespace", akv.Namespace,
-						"name", akv.Name,
-						"error", err)
-				}
-			}
-		}
-	}
 }
 
 // generateSecretProviderClass creates a SecretProviderClass from an AzureKeyVaultSync resource
@@ -1048,7 +1004,7 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 		return listErr
 	})
 	if err != nil {
-		if err.Error() == "circuit breaker is open" || strings.Contains(err.Error(), "circuit breaker is open") {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 			slog.Warn("Azure circuit breaker open, skipping vault secrets call",
 				"vault", akv.Spec.KeyvaultName,
 				"namespace", namespace,
@@ -1082,7 +1038,7 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 	}, existingSPC)
 
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if kerrors.IsNotFound(err) {
 			// SPC doesn't exist, create it
 			slog.Info("Creating SecretProviderClass",
 				"namespace", namespace,
@@ -1519,9 +1475,6 @@ func (ctrl *Controller) Run(ctx context.Context) {
 
 	// Start periodic resync
 	go ctrl.startPeriodicResync(ctx)
-
-	// Start AzureKeyVaultSync CRD watcher
-	go ctrl.watchAzureKeyVaultSync(ctx)
 
 	// Start Secret watcher for annotation synchronization
 	go ctrl.watchSecrets(ctx)
