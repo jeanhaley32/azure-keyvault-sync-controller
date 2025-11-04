@@ -102,6 +102,14 @@ func (b *SecretProviderClassBuilder) WithControllerFalse() *SecretProviderClassB
 	return b
 }
 
+// WithControllerNil sets the controller field of the last owner reference to nil
+func (b *SecretProviderClassBuilder) WithControllerNil() *SecretProviderClassBuilder {
+	if len(b.spc.OwnerReferences) > 0 {
+		b.spc.OwnerReferences[len(b.spc.OwnerReferences)-1].Controller = nil
+	}
+	return b
+}
+
 // Build returns the constructed SecretProviderClass
 func (b *SecretProviderClassBuilder) Build() *secretsstorev1.SecretProviderClass {
 	return b.spc
