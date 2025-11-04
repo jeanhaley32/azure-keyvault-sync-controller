@@ -180,13 +180,62 @@ func (ctrl *Controller) handleModified(obj *secretsstorev1.SecretProviderClass) 
 	}
 }
 
-func (ctrl *Controller) handleDeleted(namespace, name string, inCache bool) {
+func (ctrl *Controller) handleDeleted(obj *secretsstorev1.SecretProviderClass, inCache bool) {
+	namespace := obj.Namespace
+	name := obj.Name
+
 	if inCache {
 		slog.Info("Event: DELETED", "namespace", namespace, "name", name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
 	} else {
 		slog.Debug("Event: DELETED - not in cache", "namespace", namespace, "name", name)
+	}
+
+	// Check if this SPC is owned by an AzureKeyVaultSync CRD
+	// If so, immediately reconcile to recreate it (unless CRD is also deleted)
+	for _, ownerRef := range obj.OwnerReferences {
+		if ownerRef.APIVersion == "keyvault.azure.com/v1alpha1" &&
+			ownerRef.Kind == "AzureKeyVaultSync" &&
+			ownerRef.Controller != nil && *ownerRef.Controller {
+
+			slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, triggering immediate reconciliation",
+				"namespace", namespace,
+				"spc", name,
+				"owner", ownerRef.Name)
+
+			// Fetch the owning AzureKeyVaultSync CRD
+			akv := &akvv1alpha1.AzureKeyVaultSync{}
+			err := ctrl.ctrlClient.Get(context.Background(), client.ObjectKey{
+				Namespace: namespace,
+				Name:      ownerRef.Name,
+			}, akv)
+
+			if err != nil {
+				if kerrors.IsNotFound(err) {
+					slog.Info("Owner CRD not found (may have been deleted with cascade policy)",
+						"namespace", namespace, "owner", ownerRef.Name)
+				} else {
+					slog.Error("Failed to get owner CRD",
+						"namespace", namespace, "owner", ownerRef.Name, "error", err)
+				}
+				return
+			}
+
+			// Immediately reconcile the CRD (recreate SPC)
+			if err := ctrl.reconcileAzureKeyVaultSync(context.Background(), akv); err != nil {
+				slog.Error("Failed to reconcile owner CRD after SPC deletion",
+					"namespace", namespace,
+					"owner", ownerRef.Name,
+					"error", err)
+			} else {
+				slog.Info("Successfully recreated SPC after deletion",
+					"namespace", namespace,
+					"spc", name)
+			}
+
+			break // Only process the first controller owner
+		}
 	}
 }
 
@@ -209,7 +258,7 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 		ctrl.handleModified(obj)
 
 	case watch.Deleted:
-		ctrl.handleDeleted(namespace, name, inCache)
+		ctrl.handleDeleted(obj, inCache)
 
 	case watch.Error:
 		slog.Error("Event: ERROR", "namespace", namespace, "name", name)
