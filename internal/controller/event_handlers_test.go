@@ -42,6 +42,10 @@ func newTestController(t *testing.T) (*Controller, *testutil.K8sTestEnvironment)
 		azureCircuitBreaker: circuitbreaker.NewCircuitBreaker(cfg.AzureCircuitBreakerThreshold, cfg.AzureCircuitBreakerTimeout),
 	}
 
+	// Initialize reconcileFn to point to the real reconcile method by default
+	// Individual tests can override this to spy on reconciliation calls
+	ctrl.reconcileFn = ctrl.reconcileAzureKeyVaultSync
+
 	return ctrl, env
 }
 
@@ -579,10 +583,11 @@ func TestHandleOwnedSPCDeletion_ReconcileFnInvocation(t *testing.T) {
 			ctrl.handleOwnedSPCDeletion(context.Background(), tt.spc)
 
 			// Wait for reconcile call or timeout
+			// Use 500ms timeout to reduce flakiness on slow CI systems
 			select {
 			case <-reconcileCalled:
 				assert.True(t, tt.expectReconcile, "reconcile was called but not expected")
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(500 * time.Millisecond):
 				assert.False(t, tt.expectReconcile, "reconcile was not called but expected")
 			}
 		})

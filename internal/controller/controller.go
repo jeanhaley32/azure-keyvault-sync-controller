@@ -40,6 +40,12 @@ const (
 	// Label keys for service/environment filtering (multi-tenant vaults)
 	labelService     = "service"
 	labelEnvironment = "environment"
+
+	// Timeout for API calls when fetching owner CRD
+	ownerCRDGetTimeout = 10 * time.Second
+
+	// Timeout for reconcile operations triggered by SPC deletion
+	ownerReconcileTimeout = 10 * time.Second
 )
 
 // QueueKey represents a namespaced resource name for the work queue
@@ -237,7 +243,7 @@ func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secrets
 		// happens at the end of each iteration, not at function exit
 		func() {
 			// Use timeout context for API call
-			ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+			ctxWithTimeout, cancel := context.WithTimeout(ctx, ownerCRDGetTimeout)
 			defer cancel()
 
 			// Fetch the owning AzureKeyVaultSync CRD
@@ -262,9 +268,10 @@ func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secrets
 
 			// Trigger immediate SPC recreation in a goroutine to avoid blocking the event handler.
 			// Using a goroutine ensures the event loop remains responsive even if reconciliation
-			// takes longer than expected. The goroutine has its own 10-second timeout.
+			// takes longer than expected. The goroutine derives its context from the parent to
+			// ensure it stops if the controller shuts down, but has its own timeout for the reconcile operation.
 			go func(akv *akvv1alpha1.AzureKeyVaultSync, spcName, spcNamespace string) {
-				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				reconcileCtx, reconcileCancel := context.WithTimeout(ctx, ownerReconcileTimeout)
 				defer reconcileCancel()
 
 				if err := ctrl.reconcileFn(reconcileCtx, akv); err != nil {
