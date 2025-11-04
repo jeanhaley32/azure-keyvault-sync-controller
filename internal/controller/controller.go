@@ -745,49 +745,6 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 	return nil
 }
 
-// watchAzureKeyVaultSync watches AzureKeyVaultSync CRDs and reconciles them
-func (ctrl *Controller) watchAzureKeyVaultSync(ctx context.Context) {
-	slog.Info("Starting AzureKeyVaultSync CRD watcher")
-
-	// Use a ticker for periodic reconciliation
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("AzureKeyVaultSync watcher shutting down")
-			return
-		case <-ticker.C:
-			// List all AzureKeyVaultSync resources
-			var akvList akvv1alpha1.AzureKeyVaultSyncList
-			listOpts := []client.ListOption{}
-
-			// Apply namespace filter if configured
-			if ctrl.watchNamespace != "" {
-				listOpts = append(listOpts, client.InNamespace(ctrl.watchNamespace))
-			}
-
-			if err := ctrl.ctrlClient.List(ctx, &akvList, listOpts...); err != nil {
-				slog.Error("Failed to list AzureKeyVaultSync resources", "error", err)
-				continue
-			}
-
-			slog.Debug("Found AzureKeyVaultSync resources", "count", len(akvList.Items))
-
-			// Reconcile each resource
-			for _, akv := range akvList.Items {
-				if err := ctrl.reconcileAzureKeyVaultSync(ctx, &akv); err != nil {
-					slog.Error("Failed to reconcile AzureKeyVaultSync",
-						"namespace", akv.Namespace,
-						"name", akv.Name,
-						"error", err)
-				}
-			}
-		}
-	}
-}
-
 // generateSecretProviderClass creates a SecretProviderClass from an AzureKeyVaultSync resource
 func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []azure.VaultSecret) *secretsstorev1.SecretProviderClass {
 	// Build array of secret objects for the SPC
@@ -1519,9 +1476,6 @@ func (ctrl *Controller) Run(ctx context.Context) {
 
 	// Start periodic resync
 	go ctrl.startPeriodicResync(ctx)
-
-	// Start AzureKeyVaultSync CRD watcher
-	go ctrl.watchAzureKeyVaultSync(ctx)
 
 	// Start Secret watcher for annotation synchronization
 	go ctrl.watchSecrets(ctx)
