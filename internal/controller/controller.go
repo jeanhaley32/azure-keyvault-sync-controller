@@ -232,6 +232,11 @@ func (ctrl *Controller) handleOwnedSPCDeletion(obj *secretsstorev1.SecretProvide
 		// - Rate limiting: protects Azure API from overload
 		// - Bounded concurrency: controlled by worker count
 		// - Consistency: uses same reconciliation path as other events
+		//
+		// Note: OwnerReferences don't include a namespace field. We infer that the
+		// owner CRD is in the same namespace as the SPC (Kubernetes ownership rules
+		// enforce that owners and dependents must be in the same namespace for
+		// namespaced resources).
 		ownerKey := keyFor(namespace, ownerRef.Name)
 		ctrl.queue.Add(ownerKey)
 

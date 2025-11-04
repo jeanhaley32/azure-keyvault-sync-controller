@@ -576,3 +576,29 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 		})
 	}
 }
+// TestHandleOwnedSPCDeletion_Deduplication tests that multiple SPCs with the same owner
+// result in only a single queue entry due to WorkQueue deduplication
+func TestHandleOwnedSPCDeletion_Deduplication(t *testing.T) {
+	ctrl, _ := newTestController(t)
+	defer ctrl.queue.ShutDown()
+
+	// Create two different SPCs owned by the same AzureKeyVaultSync CRD
+	spc1 := testutil.NewSecretProviderClass("default", "first-spc").
+		WithServiceAccount("test-sa").
+		WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "shared-owner").
+		Build()
+
+	spc2 := testutil.NewSecretProviderClass("default", "second-spc").
+		WithServiceAccount("test-sa").
+		WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "shared-owner").
+		Build()
+
+	// Handle deletion of both SPCs
+	ctrl.handleOwnedSPCDeletion(spc1)
+	ctrl.handleOwnedSPCDeletion(spc2)
+
+	// Verify only one queue entry exists due to WorkQueue deduplication
+	keys := drainQueue(ctrl.queue)
+	assert.Len(t, keys, 1, "expected single deduplicated key for shared owner")
+	assert.Equal(t, QueueKey("default/shared-owner"), keys[0], "key should be owner CRD")
+}
