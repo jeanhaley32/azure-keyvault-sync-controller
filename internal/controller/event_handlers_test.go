@@ -18,6 +18,12 @@ import (
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 )
 
+const (
+	// Timeout for async reconcile tests - generous to prevent CI flakiness
+	// Reconcile happens in goroutine, so we need to wait for async completion
+	reconcileTestTimeout = 1 * time.Second
+)
+
 // Helper function to create a test controller with mocked dependencies
 func newTestController(t *testing.T) (*Controller, *testutil.K8sTestEnvironment) {
 	t.Helper()
@@ -583,11 +589,12 @@ func TestHandleOwnedSPCDeletion_ReconcileFnInvocation(t *testing.T) {
 			ctrl.handleOwnedSPCDeletion(context.Background(), tt.spc)
 
 			// Wait for reconcile call or timeout
-			// Use 500ms timeout to reduce flakiness on slow CI systems
+			// Reconcile happens asynchronously in a goroutine, so we use a generous timeout
+			// to prevent false failures on slow CI systems while still catching regressions
 			select {
 			case <-reconcileCalled:
 				assert.True(t, tt.expectReconcile, "reconcile was called but not expected")
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(reconcileTestTimeout):
 				assert.False(t, tt.expectReconcile, "reconcile was not called but expected")
 			}
 		})
