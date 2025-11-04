@@ -181,61 +181,84 @@ func (ctrl *Controller) handleModified(obj *secretsstorev1.SecretProviderClass) 
 }
 
 func (ctrl *Controller) handleDeleted(obj *secretsstorev1.SecretProviderClass, inCache bool) {
+	// Nil-check guard
+	if obj == nil {
+		slog.Debug("handleDeleted called with nil obj")
+		return
+	}
+
 	namespace := obj.Namespace
 	name := obj.Name
 
+	// Cache cleanup (conditional on inCache)
 	if inCache {
 		slog.Info("Event: DELETED", "namespace", namespace, "name", name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
-	} else {
-		slog.Debug("Event: DELETED - not in cache", "namespace", namespace, "name", name)
 	}
 
-	// Check if this SPC is owned by an AzureKeyVaultSync CRD
-	// If so, immediately reconcile to recreate it (unless CRD is also deleted)
+	// Owner-check and immediate reconciliation (always runs, regardless of cache state)
+	ctrl.handleOwnedSPCDeletion(context.Background(), obj)
+}
+
+// handleOwnedSPCDeletion checks if a deleted SPC is owned by an AzureKeyVaultSync CRD
+// and immediately triggers reconciliation to recreate it (unless the CRD was also deleted).
+// This provides fast recovery (1-2s) instead of waiting for periodic sync (up to 5 minutes).
+func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secretsstorev1.SecretProviderClass) {
+	namespace := obj.Namespace
+	name := obj.Name
+
+	// Check each owner reference for AzureKeyVaultSync CRD ownership
 	for _, ownerRef := range obj.OwnerReferences {
-		if ownerRef.APIVersion == "keyvault.azure.com/v1alpha1" &&
-			ownerRef.Kind == "AzureKeyVaultSync" &&
-			ownerRef.Controller != nil && *ownerRef.Controller {
-
-			slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, triggering immediate reconciliation",
-				"namespace", namespace,
-				"spc", name,
-				"owner", ownerRef.Name)
-
-			// Fetch the owning AzureKeyVaultSync CRD
-			akv := &akvv1alpha1.AzureKeyVaultSync{}
-			err := ctrl.ctrlClient.Get(context.Background(), client.ObjectKey{
-				Namespace: namespace,
-				Name:      ownerRef.Name,
-			}, akv)
-
-			if err != nil {
-				if kerrors.IsNotFound(err) {
-					slog.Info("Owner CRD not found (may have been deleted with cascade policy)",
-						"namespace", namespace, "owner", ownerRef.Name)
-				} else {
-					slog.Error("Failed to get owner CRD",
-						"namespace", namespace, "owner", ownerRef.Name, "error", err)
-				}
-				return
-			}
-
-			// Immediately reconcile the CRD (recreate SPC)
-			if err := ctrl.reconcileAzureKeyVaultSync(context.Background(), akv); err != nil {
-				slog.Error("Failed to reconcile owner CRD after SPC deletion",
-					"namespace", namespace,
-					"owner", ownerRef.Name,
-					"error", err)
-			} else {
-				slog.Info("Successfully recreated SPC after deletion",
-					"namespace", namespace,
-					"spc", name)
-			}
-
-			break // Only process the first controller owner
+		if ownerRef.APIVersion != "keyvault.azure.com/v1alpha1" ||
+			ownerRef.Kind != "AzureKeyVaultSync" ||
+			ownerRef.Controller == nil || !*ownerRef.Controller {
+			continue
 		}
+
+		slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, triggering immediate reconciliation",
+			"namespace", namespace,
+			"spc", name,
+			"owner", ownerRef.Name)
+
+		// Use timeout context for API call
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		// Fetch the owning AzureKeyVaultSync CRD
+		akv := &akvv1alpha1.AzureKeyVaultSync{}
+		err := ctrl.ctrlClient.Get(ctxWithTimeout, client.ObjectKey{
+			Namespace: namespace,
+			Name:      ownerRef.Name,
+		}, akv)
+
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				slog.Info("Owner CRD not found (may have been deleted with cascade policy)",
+					"namespace", namespace, "owner", ownerRef.Name)
+			} else {
+				slog.Error("Failed to get owner CRD",
+					"namespace", namespace, "owner", ownerRef.Name, "error", err)
+			}
+			continue // Try next owner instead of returning
+		}
+
+		// Immediately reconcile the CRD (recreate SPC)
+		// Note: We call reconcile directly instead of enqueueing to ensure immediate recreation.
+		// Enqueueing would wait for worker pool availability, defeating the purpose of fast recovery.
+		if err := ctrl.reconcileAzureKeyVaultSync(ctx, akv); err != nil {
+			slog.Error("Failed to reconcile owner CRD after SPC deletion",
+				"namespace", namespace,
+				"owner", ownerRef.Name,
+				"error", err)
+			continue // Try next owner if reconciliation fails
+		}
+
+		slog.Info("Successfully recreated SPC after deletion",
+			"namespace", namespace,
+			"spc", name)
+
+		break // Successfully processed first controller owner
 	}
 }
 

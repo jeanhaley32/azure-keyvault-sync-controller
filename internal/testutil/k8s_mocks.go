@@ -3,10 +3,13 @@ package testutil
 import (
 	"context"
 
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 	spcfake "sigs.k8s.io/secrets-store-csi-driver/pkg/client/clientset/versioned/fake"
 )
@@ -15,14 +18,21 @@ import (
 type K8sTestEnvironment struct {
 	KubeClient *fake.Clientset
 	SPCClient  *spcfake.Clientset
+	CtrlClient client.Client // Controller-runtime client for CRD access
 	Namespace  string
 }
 
 // NewK8sTestEnvironment creates a new Kubernetes test environment with mock clients
 func NewK8sTestEnvironment() *K8sTestEnvironment {
+	// Setup scheme with CRD types
+	scheme := runtime.NewScheme()
+	_ = akvv1alpha1.AddToScheme(scheme)
+	_ = secretsstorev1.AddToScheme(scheme)
+
 	return &K8sTestEnvironment{
 		KubeClient: fake.NewSimpleClientset(),
 		SPCClient:  spcfake.NewSimpleClientset(),
+		CtrlClient: fakeclient.NewClientBuilder().WithScheme(scheme).Build(),
 		Namespace:  "default",
 	}
 }
@@ -116,4 +126,19 @@ func (e *K8sTestEnvironment) DeleteSecretProviderClass(namespace, name string) e
 		name,
 		metav1.DeleteOptions{},
 	)
+}
+
+// CreateAzureKeyVaultSync creates an AzureKeyVaultSync CRD in the mock cluster
+func (e *K8sTestEnvironment) CreateAzureKeyVaultSync(akv *akvv1alpha1.AzureKeyVaultSync) error {
+	return e.CtrlClient.Create(context.Background(), akv)
+}
+
+// GetAzureKeyVaultSync retrieves an AzureKeyVaultSync CRD from the mock cluster
+func (e *K8sTestEnvironment) GetAzureKeyVaultSync(namespace, name string) (*akvv1alpha1.AzureKeyVaultSync, error) {
+	akv := &akvv1alpha1.AzureKeyVaultSync{}
+	err := e.CtrlClient.Get(context.Background(), client.ObjectKey{
+		Namespace: namespace,
+		Name:      name,
+	}, akv)
+	return akv, err
 }
