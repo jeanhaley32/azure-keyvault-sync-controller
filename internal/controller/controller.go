@@ -94,6 +94,9 @@ type Controller struct {
 	tokenProvider TokenProvider
 	vaultClient   VaultClient
 	patchClient   PatchClient
+
+	// reconcileFn allows tests to spy on reconciliation calls
+	reconcileFn func(ctx context.Context, akv *akvv1alpha1.AzureKeyVaultSync) error
 }
 
 func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface, ctrlClient client.Client, config *config.Config, watchNamespace string) *Controller {
@@ -116,7 +119,7 @@ func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface
 	vaultClient := NewRealVaultClient()
 	patchClient := NewRealPatchClient(spcClient)
 
-	return &Controller{
+	ctrl := &Controller{
 		client:              spcClient,
 		clientset:           clientset,
 		ctrlClient:          ctrlClient,
@@ -132,6 +135,12 @@ func NewController(spcClient spcclient.Interface, clientset kubernetes.Interface
 		vaultClient:         vaultClient,
 		patchClient:         patchClient,
 	}
+
+	// Initialize reconcileFn to point to the real reconcile method
+	// Tests can override this to spy on reconciliation calls
+	ctrl.reconcileFn = ctrl.reconcileAzureKeyVaultSync
+
+	return ctrl
 }
 
 func (ctrl *Controller) printCache() {
@@ -251,24 +260,27 @@ func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secrets
 				return // Return from func(), allowing loop to continue
 			}
 
-			// Immediately reconcile the CRD (recreate SPC)
-			// Note: We call reconcile directly instead of enqueueing to ensure immediate recreation.
-			// Enqueueing would wait for worker pool availability, defeating the purpose of fast recovery.
-			// The reconcile operation is typically fast (<1s for SPC creation) and includes its own
-			// timeout handling, so blocking the event handler briefly is acceptable for this use case.
-			if err := ctrl.reconcileAzureKeyVaultSync(ctx, akv); err != nil {
-				slog.Error("Failed to reconcile owner CRD after SPC deletion",
-					"namespace", namespace,
-					"owner", ownerRef.Name,
-					"spcUID", obj.UID,
-					"error", err)
-				return // Return from func(), allowing loop to continue
-			}
+			// Trigger immediate SPC recreation in a goroutine to avoid blocking the event handler.
+			// Using a goroutine ensures the event loop remains responsive even if reconciliation
+			// takes longer than expected. The goroutine has its own 10-second timeout.
+			go func(akv *akvv1alpha1.AzureKeyVaultSync, spcName, spcNamespace string) {
+				reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer reconcileCancel()
 
-			slog.Info("Successfully recreated SPC after deletion",
-				"namespace", namespace,
-				"spc", name,
-				"owner", ownerRef.Name)
+				if err := ctrl.reconcileFn(reconcileCtx, akv); err != nil {
+					slog.Error("Failed to reconcile owner CRD after SPC deletion",
+						"namespace", spcNamespace,
+						"spc", spcName,
+						"owner", akv.Name,
+						"spcUID", obj.UID,
+						"error", err)
+				} else {
+					slog.Info("Successfully recreated SPC after deletion",
+						"namespace", spcNamespace,
+						"spc", spcName,
+						"owner", akv.Name)
+				}
+			}(akv, name, namespace)
 		}()
 
 		// Successfully processed first controller owner, no need to check others

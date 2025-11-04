@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/cache"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/circuitbreaker"
@@ -474,4 +475,116 @@ func TestHandleDeletedWithOwnerReference(t *testing.T) {
 	// Note: The owner-check logic will run but the CRD won't be found, so it will log
 	// "Owner CRD not found" and return early without attempting reconciliation. This is
 	// the expected behavior for deleted resources and tests cache cleanup works correctly.
+}
+
+// TestHandleOwnedSPCDeletion_ReconcileFnInvocation tests that reconcileFn is called for valid owned SPCs
+func TestHandleOwnedSPCDeletion_ReconcileFnInvocation(t *testing.T) {
+	tests := []struct {
+		name              string
+		spc               *secretsstorev1.SecretProviderClass
+		setupCRD          bool // Whether to create the AzureKeyVaultSync CRD
+		expectReconcile   bool
+	}{
+		{
+			name: "valid owned SPC triggers reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				Build(),
+			setupCRD:        true,
+			expectReconcile: true,
+		},
+		{
+			name: "SPC with no owner references - no reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				Build(),
+			setupCRD:        false,
+			expectReconcile: false,
+		},
+		{
+			name: "SPC with wrong API version - no reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1beta1", "AzureKeyVaultSync", "test-akv").
+				Build(),
+			setupCRD:        false,
+			expectReconcile: false,
+		},
+		{
+			name: "SPC with wrong kind - no reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "WrongKind", "test-akv").
+				Build(),
+			setupCRD:        false,
+			expectReconcile: false,
+		},
+		{
+			name: "SPC with controller=false - no reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithControllerFalse().
+				Build(),
+			setupCRD:        false,
+			expectReconcile: false,
+		},
+		{
+			name: "SPC with controller=nil - no reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithControllerNil().
+				Build(),
+			setupCRD:        false,
+			expectReconcile: false,
+		},
+		{
+			name: "owned SPC but CRD not found - no reconcile",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "missing-akv").
+				Build(),
+			setupCRD:        false,
+			expectReconcile: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl, env := newTestController(t)
+			defer ctrl.queue.ShutDown()
+
+			// Channel to signal when reconcile is called
+			reconcileCalled := make(chan bool, 1)
+
+			// Override reconcileFn to spy on calls
+			ctrl.reconcileFn = func(ctx context.Context, akv *akvv1alpha1.AzureKeyVaultSync) error {
+				select {
+				case reconcileCalled <- true:
+				default:
+				}
+				return nil
+			}
+
+			// Setup CRD if needed
+			if tt.setupCRD {
+				akv := testutil.NewAzureKeyVaultSync("default", "test-akv").Build()
+				err := env.CreateAzureKeyVaultSync(akv)
+				assert.NoError(t, err, "failed to create test AzureKeyVaultSync CRD")
+			}
+
+			// Call handleOwnedSPCDeletion
+			ctrl.handleOwnedSPCDeletion(context.Background(), tt.spc)
+
+			// Wait for reconcile call or timeout
+			select {
+			case <-reconcileCalled:
+				assert.True(t, tt.expectReconcile, "reconcile was called but not expected")
+			case <-time.After(100 * time.Millisecond):
+				assert.False(t, tt.expectReconcile, "reconcile was not called but expected")
+			}
+		})
+	}
 }
