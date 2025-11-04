@@ -124,7 +124,7 @@ func TestHandleEvent(t *testing.T) {
 			tt.setupCache(ctrl)
 
 			// Call handleEvent
-			ctrl.handleEvent(tt.event)
+			ctrl.handleEvent(context.Background(), tt.event)
 
 			// Verify queue/cache state
 			tt.checkQueue(t, ctrl)
@@ -143,7 +143,7 @@ func TestHandleEvent_UnexpectedObjectType(t *testing.T) {
 	}
 
 	// Should not panic and should handle gracefully
-	ctrl.handleEvent(event)
+	ctrl.handleEvent(context.Background(), event)
 
 	// Cache should not be modified
 	assert.Equal(t, 0, len(ctrl.cache.List()))
@@ -181,7 +181,7 @@ func TestHandleEvent_AllEventTypes(t *testing.T) {
 			}
 
 			// Should not panic
-			ctrl.handleEvent(event)
+			ctrl.handleEvent(context.Background(), event)
 		})
 	}
 }

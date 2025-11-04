@@ -180,7 +180,7 @@ func (ctrl *Controller) handleModified(obj *secretsstorev1.SecretProviderClass) 
 	}
 }
 
-func (ctrl *Controller) handleDeleted(obj *secretsstorev1.SecretProviderClass, inCache bool) {
+func (ctrl *Controller) handleDeleted(ctx context.Context, obj *secretsstorev1.SecretProviderClass, inCache bool) {
 	// Nil-check guard
 	if obj == nil {
 		slog.Debug("handleDeleted called with nil obj")
@@ -195,10 +195,12 @@ func (ctrl *Controller) handleDeleted(obj *secretsstorev1.SecretProviderClass, i
 		slog.Info("Event: DELETED", "namespace", namespace, "name", name)
 		ctrl.cache.Delete(namespace, name)
 		ctrl.printCache()
+	} else {
+		slog.Debug("Event: DELETED (not in cache)", "namespace", namespace, "name", name)
 	}
 
 	// Owner-check and immediate reconciliation (always runs, regardless of cache state)
-	ctrl.handleOwnedSPCDeletion(context.Background(), obj)
+	ctrl.handleOwnedSPCDeletion(ctx, obj)
 }
 
 // handleOwnedSPCDeletion checks if a deleted SPC is owned by an AzureKeyVaultSync CRD
@@ -219,50 +221,62 @@ func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secrets
 		slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, triggering immediate reconciliation",
 			"namespace", namespace,
 			"spc", name,
-			"owner", ownerRef.Name)
+			"owner", ownerRef.Name,
+			"ownerUID", ownerRef.UID)
 
-		// Use timeout context for API call
-		ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
+		// Process this owner reference in a scoped function to ensure context cancellation
+		// happens at the end of each iteration, not at function exit
+		func() {
+			// Use timeout context for API call
+			ctxWithTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
 
-		// Fetch the owning AzureKeyVaultSync CRD
-		akv := &akvv1alpha1.AzureKeyVaultSync{}
-		err := ctrl.ctrlClient.Get(ctxWithTimeout, client.ObjectKey{
-			Namespace: namespace,
-			Name:      ownerRef.Name,
-		}, akv)
+			// Fetch the owning AzureKeyVaultSync CRD
+			akv := &akvv1alpha1.AzureKeyVaultSync{}
+			err := ctrl.ctrlClient.Get(ctxWithTimeout, client.ObjectKey{
+				Namespace: namespace,
+				Name:      ownerRef.Name,
+			}, akv)
 
-		if err != nil {
-			if kerrors.IsNotFound(err) {
-				slog.Info("Owner CRD not found (may have been deleted with cascade policy)",
-					"namespace", namespace, "owner", ownerRef.Name)
-			} else {
-				slog.Error("Failed to get owner CRD",
-					"namespace", namespace, "owner", ownerRef.Name, "error", err)
+			if err != nil {
+				if kerrors.IsNotFound(err) {
+					slog.Info("Owner CRD not found (may have been deleted with cascade policy)",
+						"namespace", namespace, "owner", ownerRef.Name)
+				} else {
+					slog.Error("Failed to get owner CRD",
+						"namespace", namespace,
+						"owner", ownerRef.Name,
+						"error", err)
+				}
+				return // Return from func(), allowing loop to continue
 			}
-			continue // Try next owner instead of returning
-		}
 
-		// Immediately reconcile the CRD (recreate SPC)
-		// Note: We call reconcile directly instead of enqueueing to ensure immediate recreation.
-		// Enqueueing would wait for worker pool availability, defeating the purpose of fast recovery.
-		if err := ctrl.reconcileAzureKeyVaultSync(ctx, akv); err != nil {
-			slog.Error("Failed to reconcile owner CRD after SPC deletion",
+			// Immediately reconcile the CRD (recreate SPC)
+			// Note: We call reconcile directly instead of enqueueing to ensure immediate recreation.
+			// Enqueueing would wait for worker pool availability, defeating the purpose of fast recovery.
+			// The reconcile operation is typically fast (<1s for SPC creation) and includes its own
+			// timeout handling, so blocking the event handler briefly is acceptable for this use case.
+			if err := ctrl.reconcileAzureKeyVaultSync(ctx, akv); err != nil {
+				slog.Error("Failed to reconcile owner CRD after SPC deletion",
+					"namespace", namespace,
+					"owner", ownerRef.Name,
+					"spcUID", obj.UID,
+					"error", err)
+				return // Return from func(), allowing loop to continue
+			}
+
+			slog.Info("Successfully recreated SPC after deletion",
 				"namespace", namespace,
-				"owner", ownerRef.Name,
-				"error", err)
-			continue // Try next owner if reconciliation fails
-		}
+				"spc", name,
+				"owner", ownerRef.Name)
+		}()
 
-		slog.Info("Successfully recreated SPC after deletion",
-			"namespace", namespace,
-			"spc", name)
-
-		break // Successfully processed first controller owner
+		// Successfully processed first controller owner, no need to check others
+		break
 	}
 }
 
-func (ctrl *Controller) handleEvent(event watch.Event) {
+func (ctrl *Controller) handleEvent(ctx context.Context, event watch.Event) {
 	obj, ok := event.Object.(*secretsstorev1.SecretProviderClass)
 	if !ok {
 		slog.Warn("Unexpected object type", "type", fmt.Sprintf("%T", event.Object))
@@ -281,7 +295,7 @@ func (ctrl *Controller) handleEvent(event watch.Event) {
 		ctrl.handleModified(obj)
 
 	case watch.Deleted:
-		ctrl.handleDeleted(obj, inCache)
+		ctrl.handleDeleted(ctx, obj, inCache)
 
 	case watch.Error:
 		slog.Error("Event: ERROR", "namespace", namespace, "name", name)
@@ -1617,7 +1631,7 @@ func (ctrl *Controller) Run(ctx context.Context) {
 					// Channel closed, reconnect
 					break watchLoop
 				}
-				ctrl.handleEvent(event)
+				ctrl.handleEvent(ctx, event)
 				ctrl.HealthChecker.UpdateWatchActivity()
 			}
 		}
