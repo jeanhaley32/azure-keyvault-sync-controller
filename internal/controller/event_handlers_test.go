@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -272,7 +271,7 @@ func TestHandleDeleted(t *testing.T) {
 			assert.Equal(t, tt.inCache, ctrl.cache.Has(tt.namespace, tt.spcName), "initial cache state")
 
 			// Call handleDeleted
-			ctrl.handleDeleted(context.Background(), spc, tt.inCache)
+			ctrl.handleDeleted( spc, tt.inCache)
 
 			// Check cache state after deletion
 			inCache := ctrl.cache.Has(tt.namespace, tt.spcName)
@@ -419,7 +418,7 @@ func TestHandleOwnedSPCDeletion(t *testing.T) {
 			}
 
 			// Call handleOwnedSPCDeletion - should not panic
-			ctrl.handleOwnedSPCDeletion(context.Background(), tt.spc)
+			ctrl.handleOwnedSPCDeletion(tt.spc)
 
 			// Verify behavior based on expectation
 			if tt.expectNoAction {
@@ -442,8 +441,8 @@ func TestHandleDeletedNilSPC(t *testing.T) {
 	defer ctrl.queue.ShutDown()
 
 	// Call handleDeleted with nil - should not panic
-	ctrl.handleDeleted(context.Background(), nil, false)
-	ctrl.handleDeleted(context.Background(), nil, true)
+	ctrl.handleDeleted(nil, false)
+	ctrl.handleDeleted(nil, true)
 
 	// No assertions needed - test passes if no panic occurs
 }
@@ -464,7 +463,7 @@ func TestHandleDeletedWithOwnerReference(t *testing.T) {
 	assert.True(t, ctrl.cache.Has("default", "test-spc"), "SPC should be in cache")
 
 	// Call handleDeleted with inCache=true
-	ctrl.handleDeleted(context.Background(), spc, true)
+	ctrl.handleDeleted(spc, true)
 
 	// Cache should be cleared
 	assert.False(t, ctrl.cache.Has("default", "test-spc"), "SPC should be removed from cache")
@@ -541,6 +540,16 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			expectEnqueued: true,
 			expectedKey:    "kube-system/system-akv",
 		},
+		{
+			name: "multiple controller owners - only first is enqueued",
+			spc: testutil.NewSecretProviderClass("default", "test-spc").
+				WithServiceAccount("test-sa").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "first-akv").
+				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "second-akv").
+				Build(),
+			expectEnqueued: true,
+			expectedKey:    "default/first-akv", // Should only enqueue first owner
+		},
 	}
 
 	for _, tt := range tests {
@@ -549,7 +558,7 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			defer ctrl.queue.ShutDown()
 
 			// Call handleOwnedSPCDeletion
-			ctrl.handleOwnedSPCDeletion(context.Background(), tt.spc)
+			ctrl.handleOwnedSPCDeletion(tt.spc)
 
 			// Check queue state
 			keys := drainQueue(ctrl.queue)

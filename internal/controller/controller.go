@@ -180,7 +180,7 @@ func (ctrl *Controller) handleModified(obj *secretsstorev1.SecretProviderClass) 
 	}
 }
 
-func (ctrl *Controller) handleDeleted(ctx context.Context, obj *secretsstorev1.SecretProviderClass, inCache bool) {
+func (ctrl *Controller) handleDeleted(obj *secretsstorev1.SecretProviderClass, inCache bool) {
 	// Nil-check guard
 	if obj == nil {
 		slog.Debug("handleDeleted called with nil obj")
@@ -200,14 +200,14 @@ func (ctrl *Controller) handleDeleted(ctx context.Context, obj *secretsstorev1.S
 	}
 
 	// Owner-check and immediate reconciliation (always runs, regardless of cache state)
-	ctrl.handleOwnedSPCDeletion(ctx, obj)
+	ctrl.handleOwnedSPCDeletion(obj)
 }
 
 // handleOwnedSPCDeletion checks if a deleted SPC is owned by an AzureKeyVaultSync CRD
 // and enqueues the owner for immediate reconciliation to recreate the SPC.
 // This provides fast recovery (seconds) instead of waiting for periodic sync (up to 5 minutes).
 // Uses the workqueue pattern for bounded concurrency, deduplication, and rate limiting.
-func (ctrl *Controller) handleOwnedSPCDeletion(ctx context.Context, obj *secretsstorev1.SecretProviderClass) {
+func (ctrl *Controller) handleOwnedSPCDeletion(obj *secretsstorev1.SecretProviderClass) {
 	namespace := obj.Namespace
 	name := obj.Name
 
@@ -264,7 +264,7 @@ func (ctrl *Controller) handleEvent(ctx context.Context, event watch.Event) {
 		ctrl.handleModified(obj)
 
 	case watch.Deleted:
-		ctrl.handleDeleted(ctx, obj, inCache)
+		ctrl.handleDeleted(obj, inCache)
 
 	case watch.Error:
 		slog.Error("Event: ERROR", "namespace", namespace, "name", name)

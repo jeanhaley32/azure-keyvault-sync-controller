@@ -24,10 +24,11 @@ type K8sTestEnvironment struct {
 
 // NewK8sTestEnvironment creates a new Kubernetes test environment with mock clients
 func NewK8sTestEnvironment() *K8sTestEnvironment {
-	// Setup scheme with CRD types
+	// Setup scheme with CRD types and core Kubernetes types
 	scheme := runtime.NewScheme()
-	_ = akvv1alpha1.AddToScheme(scheme)
-	_ = secretsstorev1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)             // Core types (Secrets, ServiceAccounts, etc.)
+	_ = akvv1alpha1.AddToScheme(scheme)        // AzureKeyVaultSync CRD
+	_ = secretsstorev1.AddToScheme(scheme)     // SecretProviderClass CRD
 
 	return &K8sTestEnvironment{
 		KubeClient: fake.NewSimpleClientset(),
