@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,6 +78,35 @@ func (b *SecretProviderClassBuilder) WithObjects(objects string) *SecretProvider
 // WithSecretObjects sets the secretObjects array in the spec
 func (b *SecretProviderClassBuilder) WithSecretObjects(secretObjects []*secretsstorev1.SecretObject) *SecretProviderClassBuilder {
 	b.spc.Spec.SecretObjects = secretObjects
+	return b
+}
+
+// WithOwnerReference adds an owner reference to the SecretProviderClass
+func (b *SecretProviderClassBuilder) WithOwnerReference(apiVersion, kind, name string) *SecretProviderClassBuilder {
+	controller := true
+	b.spc.OwnerReferences = append(b.spc.OwnerReferences, metav1.OwnerReference{
+		APIVersion: apiVersion,
+		Kind:       kind,
+		Name:       name,
+		Controller: &controller,
+	})
+	return b
+}
+
+// WithControllerFalse sets the controller field of the last owner reference to false
+func (b *SecretProviderClassBuilder) WithControllerFalse() *SecretProviderClassBuilder {
+	if len(b.spc.OwnerReferences) > 0 {
+		controller := false
+		b.spc.OwnerReferences[len(b.spc.OwnerReferences)-1].Controller = &controller
+	}
+	return b
+}
+
+// WithControllerNil sets the controller field of the last owner reference to nil
+func (b *SecretProviderClassBuilder) WithControllerNil() *SecretProviderClassBuilder {
+	if len(b.spc.OwnerReferences) > 0 {
+		b.spc.OwnerReferences[len(b.spc.OwnerReferences)-1].Controller = nil
+	}
 	return b
 }
 
@@ -291,4 +321,56 @@ func VaultCertificatesWithTags() []azure.VaultCertificate {
 			Build(),
 		NewVaultCertificate("cert3").Build(), // No tags
 	}
+}
+
+// AzureKeyVaultSyncBuilder provides a fluent API for building test AzureKeyVaultSync CRD resources
+type AzureKeyVaultSyncBuilder struct {
+	akv *akvv1alpha1.AzureKeyVaultSync
+}
+
+// NewAzureKeyVaultSync creates a new AzureKeyVaultSync builder with sensible defaults
+func NewAzureKeyVaultSync(namespace, name string) *AzureKeyVaultSyncBuilder {
+	return &AzureKeyVaultSyncBuilder{
+		akv: &akvv1alpha1.AzureKeyVaultSync{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
+			Spec: akvv1alpha1.AzureKeyVaultSyncSpec{
+				KeyvaultName:   "test-vault",
+				TenantID:       "00000000-0000-0000-0000-000000000000",
+				ClientID:       "00000000-0000-0000-0000-000000000000",
+				ServiceAccount: "test-sa",
+			},
+		},
+	}
+}
+
+// WithKeyvaultName sets the keyvault name
+func (b *AzureKeyVaultSyncBuilder) WithKeyvaultName(keyvaultName string) *AzureKeyVaultSyncBuilder {
+	b.akv.Spec.KeyvaultName = keyvaultName
+	return b
+}
+
+// WithTenantID sets the tenant ID
+func (b *AzureKeyVaultSyncBuilder) WithTenantID(tenantID string) *AzureKeyVaultSyncBuilder {
+	b.akv.Spec.TenantID = tenantID
+	return b
+}
+
+// WithClientID sets the client ID
+func (b *AzureKeyVaultSyncBuilder) WithClientID(clientID string) *AzureKeyVaultSyncBuilder {
+	b.akv.Spec.ClientID = clientID
+	return b
+}
+
+// WithServiceAccount sets the service account
+func (b *AzureKeyVaultSyncBuilder) WithServiceAccount(serviceAccount string) *AzureKeyVaultSyncBuilder {
+	b.akv.Spec.ServiceAccount = serviceAccount
+	return b
+}
+
+// Build returns the constructed AzureKeyVaultSync
+func (b *AzureKeyVaultSyncBuilder) Build() *akvv1alpha1.AzureKeyVaultSync {
+	return b.akv
 }
