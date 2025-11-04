@@ -179,45 +179,65 @@ func getEnv(key, defaultValue string) string {
 
 func parseIntEnv(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.Atoi(value); err == nil {
-			return parsed
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Invalid environment variable %s=%q: %v (using default: %d)\n",
+				key, value, err, defaultValue)
+			return defaultValue
 		}
+		return parsed
 	}
 	return defaultValue
 }
 
 func parseInt64Env(key string, defaultValue int64) int64 {
 	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
-			return parsed
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Invalid environment variable %s=%q: %v (using default: %d)\n",
+				key, value, err, defaultValue)
+			return defaultValue
 		}
+		return parsed
 	}
 	return defaultValue
 }
 
 func parseFloatEnv(key string, defaultValue float64) float64 {
 	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
-			return parsed
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Invalid environment variable %s=%q: %v (using default: %f)\n",
+				key, value, err, defaultValue)
+			return defaultValue
 		}
+		return parsed
 	}
 	return defaultValue
 }
 
 func parseFloat32Env(key string, defaultValue float32) float32 {
 	if value := os.Getenv(key); value != "" {
-		if parsed, err := strconv.ParseFloat(value, 32); err == nil {
-			return float32(parsed)
+		parsed, err := strconv.ParseFloat(value, 32)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Invalid environment variable %s=%q: %v (using default: %f)\n",
+				key, value, err, defaultValue)
+			return defaultValue
 		}
+		return float32(parsed)
 	}
 	return defaultValue
 }
 
 func parseDurationEnv(key string, defaultValue time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
-		if parsed, err := time.ParseDuration(value); err == nil {
-			return parsed
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: Invalid environment variable %s=%q: %v (using default: %v)\n",
+				key, value, err, defaultValue)
+			return defaultValue
 		}
+		return parsed
 	}
 	return defaultValue
 }
