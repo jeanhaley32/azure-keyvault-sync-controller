@@ -372,7 +372,7 @@ func TestHandleOwnedSPCDeletion(t *testing.T) {
 			name: "SPC with wrong kind",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "WrongKind", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "WrongKind", "test-akv").
 				Build(),
 			expectNoAction: true,
 		},
@@ -380,7 +380,7 @@ func TestHandleOwnedSPCDeletion(t *testing.T) {
 			name: "SPC with owner but controller=false",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				WithControllerFalse().
 				Build(),
 			expectNoAction: true,
@@ -389,7 +389,7 @@ func TestHandleOwnedSPCDeletion(t *testing.T) {
 			name: "SPC with owner but controller=nil",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				WithControllerNil().
 				Build(),
 			expectNoAction: true,
@@ -398,7 +398,7 @@ func TestHandleOwnedSPCDeletion(t *testing.T) {
 			name: "SPC owned by AzureKeyVaultSync - CRD not found",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "missing-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "missing-akv").
 				Build(),
 			setupMockCRDState: func(env *testutil.K8sTestEnvironment) {
 				// Don't create the CRD - it should not be found
@@ -457,7 +457,7 @@ func TestHandleDeletedWithOwnerReference(t *testing.T) {
 	// Create SPC with owner reference (but don't create the actual CRD to avoid triggering reconciliation)
 	spc := testutil.NewSecretProviderClass("default", "test-spc").
 		WithServiceAccount("test-sa").
-		WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+		WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "test-akv").
 		Build()
 
 	// Add to cache
@@ -487,7 +487,7 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			name: "valid owned SPC enqueues owner CRD",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				Build(),
 			expectEnqueued: true,
 			expectedKey:    "default/test-akv",
@@ -511,7 +511,7 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			name: "SPC with wrong kind - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "WrongKind", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "WrongKind", "test-akv").
 				Build(),
 			expectEnqueued: false,
 		},
@@ -519,7 +519,7 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			name: "SPC with controller=false - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				WithControllerFalse().
 				Build(),
 			expectEnqueued: false,
@@ -528,7 +528,7 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			name: "SPC with controller=nil - nothing enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "test-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "test-akv").
 				WithControllerNil().
 				Build(),
 			expectEnqueued: false,
@@ -537,7 +537,7 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			name: "owned SPC in different namespace",
 			spc: testutil.NewSecretProviderClass("kube-system", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "system-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "system-akv").
 				Build(),
 			expectEnqueued: true,
 			expectedKey:    "kube-system/system-akv",
@@ -546,8 +546,8 @@ func TestHandleOwnedSPCDeletion_QueueBehavior(t *testing.T) {
 			name: "multiple controller owners - only first is enqueued",
 			spc: testutil.NewSecretProviderClass("default", "test-spc").
 				WithServiceAccount("test-sa").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "first-akv").
-				WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "second-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "first-akv").
+				WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "second-akv").
 				Build(),
 			expectEnqueued: true,
 			expectedKey:    "default/first-akv", // Should only enqueue first owner
@@ -585,12 +585,12 @@ func TestHandleOwnedSPCDeletion_Deduplication(t *testing.T) {
 	// Create two different SPCs owned by the same AzureKeyVaultSync CRD
 	spc1 := testutil.NewSecretProviderClass("default", "first-spc").
 		WithServiceAccount("test-sa").
-		WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "shared-owner").
+		WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "shared-owner").
 		Build()
 
 	spc2 := testutil.NewSecretProviderClass("default", "second-spc").
 		WithServiceAccount("test-sa").
-		WithOwnerReference("keyvault.azure.com/v1alpha1", "AzureKeyVaultSync", "shared-owner").
+		WithOwnerReference("azure-keyvault-sync.io/v1alpha1", "AzureKeyVaultSync", "shared-owner").
 		Build()
 
 	// Handle deletion of both SPCs
