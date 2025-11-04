@@ -258,11 +258,13 @@ func TestHandleDeleted(t *testing.T) {
 			ctrl, _ := newTestController(t)
 			defer ctrl.queue.ShutDown()
 
+			// Create SPC object for testing
+			spc := testutil.NewSecretProviderClass(tt.namespace, tt.spcName).
+				WithServiceAccount("test-sa").
+				Build()
+
 			// Pre-populate cache if needed
 			if tt.inCache {
-				spc := testutil.NewSecretProviderClass(tt.namespace, tt.spcName).
-					WithServiceAccount("test-sa").
-					Build()
 				ctrl.cache.Set(tt.namespace, tt.spcName, spc)
 			}
 
@@ -270,7 +272,7 @@ func TestHandleDeleted(t *testing.T) {
 			assert.Equal(t, tt.inCache, ctrl.cache.Has(tt.namespace, tt.spcName), "initial cache state")
 
 			// Call handleDeleted
-			ctrl.handleDeleted(tt.namespace, tt.spcName, tt.inCache)
+			ctrl.handleDeleted(spc, tt.inCache)
 
 			// Check cache state after deletion
 			inCache := ctrl.cache.Has(tt.namespace, tt.spcName)
