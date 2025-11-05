@@ -890,20 +890,49 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	return spc
 }
 
-// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling
+// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling.
+// The Azure CSI driver expects each array element to be a YAML string (literal block scalar), not a map.
+// Format:
+//
+//	array:
+//	  - |
+//	    objectName: secret-name
+//	    objectType: secret
 func buildObjectsArrayString(objects []map[string]interface{}) (string, error) {
-	// Wrap the objects array in a map with "array" key as expected by the CSI driver
-	wrapper := map[string]interface{}{
-		"array": objects,
+	if len(objects) == 0 {
+		return "array: []\n", nil
 	}
 
-	// Marshal to YAML using safe library to prevent injection vulnerabilities
-	yamlBytes, err := yaml.Marshal(wrapper)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal objects array to YAML: %w", err)
+	// Convert each object to a YAML string (literal block scalar)
+	var arrayElements []string
+	for _, obj := range objects {
+		// Marshal each object to YAML
+		objYAML, err := yaml.Marshal(obj)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal object to YAML: %w", err)
+		}
+
+		// Trim trailing newline from marshaled YAML
+		objStr := strings.TrimSuffix(string(objYAML), "\n")
+
+		// Add to array elements
+		arrayElements = append(arrayElements, objStr)
 	}
 
-	return string(yamlBytes), nil
+	// Build the final YAML manually to ensure correct format with literal block scalars
+	var result strings.Builder
+	result.WriteString("array:\n")
+	for _, elem := range arrayElements {
+		result.WriteString("  - |\n")
+		// Indent each line of the object YAML by 4 spaces
+		for _, line := range strings.Split(elem, "\n") {
+			result.WriteString("    ")
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String(), nil
 }
 
 // compareSecretObjects compares two SecretObject slices for equality
