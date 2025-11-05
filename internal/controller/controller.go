@@ -199,64 +199,9 @@ func (ctrl *Controller) handleDeleted(obj *secretsstorev1.SecretProviderClass, i
 		slog.Debug("Event: DELETED (not in cache)", "namespace", namespace, "name", name)
 	}
 
-	// Owner-check and immediate reconciliation (always runs, regardless of cache state)
-	ctrl.handleOwnedSPCDeletion(obj)
-}
-
-// handleOwnedSPCDeletion checks if a deleted SPC is owned by an AzureKeyVaultSync CRD
-// and enqueues the owner for immediate reconciliation to recreate the SPC.
-// This provides fast recovery (seconds) instead of waiting for periodic sync (up to 5 minutes).
-// Uses the workqueue pattern for bounded concurrency, deduplication, and rate limiting.
-func (ctrl *Controller) handleOwnedSPCDeletion(obj *secretsstorev1.SecretProviderClass) {
-	namespace := obj.Namespace
-	name := obj.Name
-
-	// Check each owner reference for AzureKeyVaultSync CRD ownership
-	for _, ownerRef := range obj.OwnerReferences {
-		// Only process the first controlling owner reference matching our CRD type
-		// Use API package constants to ensure we match the actual CRD definition
-		if ownerRef.APIVersion != akvv1alpha1.GroupVersion.String() ||
-			ownerRef.Kind != akvv1alpha1.Kind ||
-			ownerRef.Controller == nil || !*ownerRef.Controller {
-			continue
-		}
-
-		slog.Info("Deleted SPC is owned by AzureKeyVaultSync CRD, enqueueing owner for immediate reconciliation",
-			"namespace", namespace,
-			"spc", name,
-			"owner", ownerRef.Name,
-			"ownerUID", ownerRef.UID)
-
-		// Defensive check: ensure workqueue is initialized
-		if ctrl.queue == nil {
-			slog.Error("workqueue is nil, cannot enqueue owner",
-				"namespace", namespace,
-				"owner", ownerRef.Name)
-			return
-		}
-
-		// Enqueue the owner CRD for reconciliation using the workqueue pattern.
-		// This provides:
-		// - Deduplication: multiple SPC deletions for same owner → single reconcile
-		// - Rate limiting: protects Azure API from overload
-		// - Bounded concurrency: controlled by worker count
-		// - Consistency: uses same reconciliation path as other events
-		//
-		// Note: OwnerReferences don't include a namespace field. We infer that the
-		// owner CRD is in the same namespace as the SPC (Kubernetes ownership rules
-		// enforce that owners and dependents must be in the same namespace for
-		// namespaced resources).
-		ownerKey := keyFor(namespace, ownerRef.Name)
-		ctrl.queue.Add(ownerKey)
-
-		slog.Debug("Enqueued owner CRD for reconciliation",
-			"namespace", namespace,
-			"owner", ownerRef.Name,
-			"queueKey", ownerKey)
-
-		// Successfully processed first controller owner, no need to check others
-		break
-	}
+	// Note: Owned SPC recreation is now handled by controller-runtime's .Owns() mechanism.
+	// When a SecretProviderClass with OwnerReferences is deleted, controller-runtime
+	// automatically enqueues the owner AzureKeyVaultSync CRD for reconciliation.
 }
 
 func (ctrl *Controller) handleEvent(event watch.Event) {
