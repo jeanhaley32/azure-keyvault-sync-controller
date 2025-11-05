@@ -9,6 +9,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 )
 
 // AzureKeyVaultSyncReconciler reconciles AzureKeyVaultSync CRD objects
@@ -22,6 +23,7 @@ func (r *AzureKeyVaultSyncReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	slog.Info("Registering AzureKeyVaultSync controller with manager")
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&akvv1alpha1.AzureKeyVaultSync{}).
+		Owns(&secretsstorev1.SecretProviderClass{}).
 		Complete(r)
 }
 
