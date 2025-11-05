@@ -890,20 +890,110 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 	return spc
 }
 
-// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling
+// buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling.
+// The Azure CSI driver expects each array element to be a YAML string (literal block scalar), not a map.
+// Format:
+//
+//	array:
+//	  - |
+//	    objectName: secret-name
+//	    objectType: secret
 func buildObjectsArrayString(objects []map[string]interface{}) (string, error) {
-	// Wrap the objects array in a map with "array" key as expected by the CSI driver
-	wrapper := map[string]interface{}{
-		"array": objects,
+	if len(objects) == 0 {
+		return "array: []\n", nil
 	}
 
-	// Marshal to YAML using safe library to prevent injection vulnerabilities
-	yamlBytes, err := yaml.Marshal(wrapper)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal objects array to YAML: %w", err)
+	// Convert each object to a YAML string (literal block scalar)
+	var arrayElements []string
+	for _, obj := range objects {
+		// Marshal each object to YAML
+		objYAML, err := yaml.Marshal(obj)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal object to YAML: %w", err)
+		}
+
+		// Trim trailing newline from marshaled YAML
+		objStr := strings.TrimSuffix(string(objYAML), "\n")
+
+		// Add to array elements
+		arrayElements = append(arrayElements, objStr)
 	}
 
-	return string(yamlBytes), nil
+	// Build the final YAML manually to ensure correct format with literal block scalars
+	var result strings.Builder
+	result.WriteString("array:\n")
+	for _, elem := range arrayElements {
+		result.WriteString("  - |\n")
+		// Indent each line of the object YAML by 4 spaces
+		for _, line := range strings.Split(elem, "\n") {
+			result.WriteString("    ")
+			result.WriteString(line)
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String(), nil
+}
+
+// validateSecretProviderClass validates the generated SPC before applying it to the cluster.
+// This ensures the YAML format is correct and can be parsed by the Azure CSI driver.
+func validateSecretProviderClass(spc *secretsstorev1.SecretProviderClass) error {
+	// Validate basic structure
+	if spc.Spec.Provider != "azure" {
+		return fmt.Errorf("invalid provider: expected 'azure', got '%s'", spc.Spec.Provider)
+	}
+
+	// Validate required parameters exist
+	requiredParams := []string{"objects", "keyvaultName", "tenantId", "clientID"}
+	for _, param := range requiredParams {
+		if _, exists := spc.Spec.Parameters[param]; !exists {
+			return fmt.Errorf("missing required parameter: %s", param)
+		}
+	}
+
+	// Validate objects array YAML format
+	objectsYAML := spc.Spec.Parameters["objects"]
+	if objectsYAML == "" {
+		return fmt.Errorf("objects parameter is empty")
+	}
+
+	// Try to unmarshal the objects YAML to ensure it's valid
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal([]byte(objectsYAML), &parsed); err != nil {
+		return fmt.Errorf("objects parameter contains invalid YAML: %w", err)
+	}
+
+	// Verify the array key exists
+	arrayInterface, exists := parsed["array"]
+	if !exists {
+		return fmt.Errorf("objects parameter missing 'array' key")
+	}
+
+	// Verify array is actually an array
+	array, ok := arrayInterface.([]interface{})
+	if !ok {
+		return fmt.Errorf("objects 'array' is not an array, got %T", arrayInterface)
+	}
+
+	// Verify each array element is a string (literal block scalar)
+	// This is what the Azure CSI driver expects
+	for i, elem := range array {
+		if _, ok := elem.(string); !ok {
+			return fmt.Errorf("objects array element %d is not a string (got %T), CSI driver will fail to parse", i, elem)
+		}
+	}
+
+	// Validate at least one object exists
+	if len(array) == 0 {
+		return fmt.Errorf("objects array is empty, at least one secret/cert required")
+	}
+
+	slog.Debug("SecretProviderClass validation passed",
+		"namespace", spc.Namespace,
+		"name", spc.Name,
+		"objectCount", len(array))
+
+	return nil
 }
 
 // compareSecretObjects compares two SecretObject slices for equality
@@ -1043,6 +1133,11 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 
 	// Step 5: Generate SecretProviderClass
 	desiredSPC := generateSecretProviderClass(akv, filteredSecrets)
+
+	// Step 5.5: Validate the generated SPC before applying
+	if err := validateSecretProviderClass(desiredSPC); err != nil {
+		return fmt.Errorf("generated SecretProviderClass failed validation: %w", err)
+	}
 
 	// Step 6: Create or update the SecretProviderClass
 	existingSPC := &secretsstorev1.SecretProviderClass{}
