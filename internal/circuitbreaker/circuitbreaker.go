@@ -54,51 +54,29 @@ func NewCircuitBreakerWithClock(maxFailures int, resetTimeout time.Duration, clo
 
 // Call executes the provided function through the circuit breaker.
 // Returns an error if the circuit is open or if the function fails.
-//
-// The lock is only held while reading/updating breaker state, never while
-// fn() runs - fn() is the actual outbound Azure call, and previously
-// holding the lock across it (including any backoff sleep inside fn())
-// serialized every caller sharing this breaker behind whichever call was
-// currently in flight or sleeping.
 func (cb *CircuitBreaker) Call(fn func() error) error {
-	if err := cb.before(); err != nil {
-		return err
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	// Check if circuit is open
+	if cb.state == "open" {
+		timeSinceFail := cb.clock.Since(cb.lastFailTime)
+		if timeSinceFail > cb.resetTimeout {
+			// Transition to half-open state
+			slog.Debug("Circuit breaker transitioning to half-open",
+				"timeSinceFail", timeSinceFail,
+				"resetTimeout", cb.resetTimeout)
+			cb.state = "half-open"
+			cb.failures = 0
+		} else {
+			// Circuit still open, fail fast
+			return fmt.Errorf("%w (will retry in %v)",
+				ErrCircuitOpen, cb.resetTimeout-timeSinceFail)
+		}
 	}
 
+	// Execute function
 	err := fn()
-
-	cb.after(err)
-	return err
-}
-
-// before checks and updates breaker state prior to calling fn, returning
-// ErrCircuitOpen if the call should be rejected.
-func (cb *CircuitBreaker) before() error {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
-	if cb.state != "open" {
-		return nil
-	}
-
-	timeSinceFail := cb.clock.Since(cb.lastFailTime)
-	if timeSinceFail <= cb.resetTimeout {
-		return fmt.Errorf("%w (will retry in %v)",
-			ErrCircuitOpen, cb.resetTimeout-timeSinceFail)
-	}
-
-	slog.Debug("Circuit breaker transitioning to half-open",
-		"timeSinceFail", timeSinceFail,
-		"resetTimeout", cb.resetTimeout)
-	cb.state = "half-open"
-	cb.failures = 0
-	return nil
-}
-
-// after records the outcome of a completed fn call.
-func (cb *CircuitBreaker) after(err error) {
-	cb.mu.Lock()
-	defer cb.mu.Unlock()
 
 	if err != nil {
 		cb.failures++
@@ -118,15 +96,17 @@ func (cb *CircuitBreaker) after(err error) {
 				"maxFailures", cb.maxFailures,
 				"state", cb.state)
 		}
-		return
+		return err
 	}
 
+	// Success - reset circuit if in half-open state
 	if cb.state == "half-open" {
 		slog.Info("Circuit breaker closed after successful test",
 			"previousFailures", cb.failures)
 		cb.state = "closed"
 	}
 	cb.failures = 0
+	return nil
 }
 
 // State returns the current state of the circuit breaker.

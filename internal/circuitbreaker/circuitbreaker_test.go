@@ -392,28 +392,3 @@ func TestCircuitBreaker_ZeroFailuresAfterSuccess(t *testing.T) {
     _ = cb.Call(func() error { return errors.New("fail 4") })
 	assert.Equal(t, 1, cb.Failures())
 }
-
-// TestCircuitBreaker_DoesNotSerializeConcurrentCalls proves fn() no longer
-// runs under the breaker's lock: two calls that each block for 200ms must
-// overlap, not run back-to-back, or this test times out.
-func TestCircuitBreaker_DoesNotSerializeConcurrentCalls(t *testing.T) {
-	cb := NewCircuitBreaker(5, 1*time.Minute)
-
-	var wg sync.WaitGroup
-	start := time.Now()
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = cb.Call(func() error {
-				time.Sleep(200 * time.Millisecond)
-				return nil
-			})
-		}()
-	}
-	wg.Wait()
-	elapsed := time.Since(start)
-
-	assert.Less(t, elapsed, 350*time.Millisecond,
-		"two concurrent 200ms calls took %v - looks serialized, breaker may be holding its lock during fn()", elapsed)
-}

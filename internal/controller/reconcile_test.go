@@ -181,6 +181,24 @@ func TestReconcileResource_ListCertificatesError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to list certificates from vault")
 }
 
+// TestReconcileResource_CircuitOpenIsReportedAsError verifies an open
+// circuit breaker surfaces as a real error (retried, visibly logged) rather
+// than being reported as a successful reconcile - see issue #59.
+func TestReconcileResource_CircuitOpenIsReportedAsError(t *testing.T) {
+	spc := createValidSPC()
+
+	ctrl := createTestController()
+	// Force the breaker open before reconcileResource ever calls it.
+	for i := 0; i < ctrl.config.AzureCircuitBreakerThreshold; i++ {
+		_ = ctrl.azureCircuitBreaker.Call(func() error { return errors.New("boom") })
+	}
+
+	err := ctrl.reconcileResource(context.Background(), spc)
+
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, circuitbreaker.ErrCircuitOpen)
+}
+
 // TestReconcileResource_SuccessfulReconciliation tests successful reconciliation flow
 func TestReconcileResource_SuccessfulReconciliation(t *testing.T) {
 	spc := createValidSPC()
