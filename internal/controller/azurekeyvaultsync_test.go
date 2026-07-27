@@ -7,6 +7,7 @@ import (
 	akvv1alpha1 "github.com/jeanhaley32/azure-keyvault-sync-controller/api/v1alpha1"
 	"github.com/jeanhaley32/azure-keyvault-sync-controller/internal/azure"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	secretsstorev1 "sigs.k8s.io/secrets-store-csi-driver/apis/v1"
 )
@@ -121,7 +122,8 @@ func TestGenerateSecretProviderClass(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			spc := generateSecretProviderClass(tt.akv, tt.secrets)
+			spc, err := generateSecretProviderClass(tt.akv, tt.secrets)
+			require.NoError(t, err)
 
 			// Verify SPC name matches CRD name
 			assert.Equal(t, tt.expectedSPCName, spc.Name)
@@ -196,7 +198,8 @@ func TestGenerateSecretProviderClass_SecretObjectTag(t *testing.T) {
 		},
 	}
 
-	spc := generateSecretProviderClass(akv, secrets)
+	spc, err := generateSecretProviderClass(akv, secrets)
+	require.NoError(t, err)
 
 	// Verify objects parameter exists when secrets are present
 	assert.Contains(t, spc.Spec.Parameters, "objects")

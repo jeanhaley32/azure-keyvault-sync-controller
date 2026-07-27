@@ -759,7 +759,7 @@ func (ctrl *Controller) reconcile(ctx context.Context, key QueueKey) error {
 }
 
 // generateSecretProviderClass creates a SecretProviderClass from an AzureKeyVaultSync resource
-func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []azure.VaultSecret) *secretsstorev1.SecretProviderClass {
+func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []azure.VaultSecret) (*secretsstorev1.SecretProviderClass, error) {
 	// Build array of secret objects for the SPC
 	var objects []map[string]interface{}
 
@@ -841,7 +841,7 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 				"namespace", akv.Namespace,
 				"name", akv.Name,
 				"error", err)
-			return nil
+			return nil, fmt.Errorf("failed to marshal objects array to YAML: %w", err)
 		}
 		spc.Spec.Parameters["objects"] = objectsYAML
 	}
@@ -887,7 +887,7 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 			"totalCount", len(spcAnnotations))
 	}
 
-	return spc
+	return spc, nil
 }
 
 // buildObjectsArrayString builds the objects array string for SPC parameters using safe YAML marshaling.
@@ -1132,7 +1132,10 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 		"filters", akv.Spec.Filters)
 
 	// Step 5: Generate SecretProviderClass
-	desiredSPC := generateSecretProviderClass(akv, filteredSecrets)
+	desiredSPC, err := generateSecretProviderClass(akv, filteredSecrets)
+	if err != nil {
+		return fmt.Errorf("failed to generate SecretProviderClass: %w", err)
+	}
 
 	// Step 5.5: Validate the generated SPC before applying
 	if err := validateSecretProviderClass(desiredSPC); err != nil {
