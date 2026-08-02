@@ -305,8 +305,10 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 				"vault", keyvaultName,
 				"namespace", namespace,
 				"name", name)
-			// Return nil to allow requeueing without marking as permanent failure
-			return nil
+			// Return the error (not nil) so this reconcile is retried and
+			// visibly logged, rather than silently reported as a success
+			// while the circuit stays open - see issue #59.
+			return err
 		}
 		// Fail the reconciliation for other errors
 		return fmt.Errorf("failed to list secrets from vault %s: %w", keyvaultName, err)
@@ -328,8 +330,9 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 				"vault", keyvaultName,
 				"namespace", namespace,
 				"name", name)
-			// Return nil to allow requeueing without marking as permanent failure
-			return nil
+			// See issue #59: return the error, not nil, so this is
+			// retried and visibly logged instead of reported as success.
+			return err
 		}
 		// Fail the reconciliation for other errors
 		return fmt.Errorf("failed to list certificates from vault %s: %w", keyvaultName, err)
@@ -1113,7 +1116,9 @@ func (ctrl *Controller) reconcileAzureKeyVaultSync(ctx context.Context, akv *akv
 				"vault", akv.Spec.KeyvaultName,
 				"namespace", namespace,
 				"name", name)
-			return nil
+			// See issue #59: return the error, not nil, so this is
+			// retried and visibly logged instead of reported as success.
+			return err
 		}
 		return fmt.Errorf("failed to list vault secrets: %w", err)
 	}
