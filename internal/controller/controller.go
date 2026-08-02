@@ -835,19 +835,21 @@ func generateSecretProviderClass(akv *akvv1alpha1.AzureKeyVaultSync, secrets []a
 		},
 	}
 
-	// Add objects array to parameters as YAML/JSON
-	// The CSI driver expects this as a YAML string
-	if len(objects) > 0 {
-		objectsYAML, err := buildObjectsArrayString(objects)
-		if err != nil {
-			slog.Error("Failed to marshal objects array to YAML",
-				"namespace", akv.Namespace,
-				"name", akv.Name,
-				"error", err)
-			return nil
-		}
-		spc.Spec.Parameters["objects"] = objectsYAML
+	// Add objects array to parameters as YAML/JSON.
+	// Always set this, even when empty: a zero-secret match is a legitimate
+	// desired state (all secrets untagged/filtered out), and must still
+	// produce a valid SPC ("array: []") rather than omitting the parameter
+	// and failing validation, which would leave a stale SPC serving revoked
+	// secrets indefinitely.
+	objectsYAML, err := buildObjectsArrayString(objects)
+	if err != nil {
+		slog.Error("Failed to marshal objects array to YAML",
+			"namespace", akv.Namespace,
+			"name", akv.Name,
+			"error", err)
+		return nil
 	}
+	spc.Spec.Parameters["objects"] = objectsYAML
 
 	// Generate secretObjects based on vault tags (secret-object=true)
 	// No certificates in CRD mode, so pass empty slice for certs
@@ -986,10 +988,9 @@ func validateSecretProviderClass(spc *secretsstorev1.SecretProviderClass) error 
 		}
 	}
 
-	// Validate at least one object exists
-	if len(array) == 0 {
-		return fmt.Errorf("objects array is empty, at least one secret/cert required")
-	}
+	// Note: an empty array is a valid desired state (zero secrets currently
+	// match the sync tag/filters) and must not be rejected here — see the
+	// comment in generateSecretProviderClass.
 
 	slog.Debug("SecretProviderClass validation passed",
 		"namespace", spc.Namespace,
