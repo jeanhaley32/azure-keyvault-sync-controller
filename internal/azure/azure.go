@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -16,6 +17,22 @@ const (
 	azureTokenRenewalThreshold = 0.8 // Renew at 80% of lifetime
 	keyVaultScope              = "https://vault.azure.net/.default"
 )
+
+// tenantIDPattern matches an Azure AD tenant ID: either a GUID or the
+// literal "organizations"/"common"/"consumers" authority aliases Azure
+// itself accepts. tenantID is interpolated into the AAD authority URL used
+// for the SA-token-for-AAD-token exchange (azidentity.NewClientAssertionCredential),
+// so an unvalidated value from a third-party CRD's free-form spec.parameters
+// map is the same class of SSRF/token-exfiltration risk as keyvaultName
+// (see gh-68) - enforce it here too rather than trusting the caller.
+var tenantIDPattern = regexp.MustCompile(`^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|organizations|common|consumers)$`)
+
+func ValidateTenantID(tenantID string) error {
+	if !tenantIDPattern.MatchString(tenantID) {
+		return fmt.Errorf("invalid tenantId %q: must be a GUID or one of organizations/common/consumers", tenantID)
+	}
+	return nil
+}
 
 // AzureTokenCache manages Azure AD access tokens with automatic renewal
 type AzureTokenCache struct {
@@ -208,6 +225,9 @@ func ExtractTenantID(obj *unstructured.Unstructured) (string, error) {
 	}
 	if !found || tenantID == "" {
 		return "", fmt.Errorf("tenantId not found in spec.parameters")
+	}
+	if err := ValidateTenantID(tenantID); err != nil {
+		return "", err
 	}
 
 	slog.Debug("Extracted tenantID",

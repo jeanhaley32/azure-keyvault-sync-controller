@@ -66,7 +66,7 @@ func TestReconcileResourceValidation(t *testing.T) {
 					spc.Spec.Parameters["clientID"] = "test-client-id"
 				}
 				if _, ok := spc.Spec.Parameters["tenantId"]; !ok && tt.expectError != "missing tenantId" {
-					spc.Spec.Parameters["tenantId"] = "test-tenant-id"
+					spc.Spec.Parameters["tenantId"] = "11111111-2222-3333-4444-555555555555"
 				}
 				if _, ok := spc.Spec.Parameters["keyvaultName"]; !ok && tt.expectError != "missing keyvaultName" {
 					spc.Spec.Parameters["keyvaultName"] = "test-vault"
@@ -80,7 +80,7 @@ func TestReconcileResourceValidation(t *testing.T) {
 			if sa, hasServiceAccount := getServiceAccount(spc); hasServiceAccount && sa != "" {
 				serviceAccount := testutil.NewServiceAccount(spc.Namespace, sa).
 					WithAzureClientID("test-client-id").
-					WithAzureTenantID("test-tenant-id").
+					WithAzureTenantID("11111111-2222-3333-4444-555555555555").
 					Build()
 				env.WithServiceAccount(serviceAccount)
 			}

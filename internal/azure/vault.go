@@ -4,7 +4,8 @@ import (
 	"log/slog"
 	"context"
 	"fmt"
-	
+	"regexp"
+
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -13,6 +14,23 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// keyvaultNamePattern matches Azure's own Key Vault naming rules: 3-24
+// characters, alphanumeric and hyphens, must start with a letter and end
+// with a letter or digit. Enforced here (not just relied on server-side)
+// because this value is interpolated directly into a request URL
+// (fmt.Sprintf("https://%s.vault.azure.net", vaultName)) - an unvalidated
+// value like "attacker.example.com/x" turns that into an SSRF that sends
+// the controller's live Azure AD access token to an attacker-controlled
+// host. See gh-68.
+var keyvaultNamePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$`)
+
+func ValidateKeyvaultName(name string) error {
+	if !keyvaultNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid keyvaultName %q: must be 3-24 characters, alphanumeric and hyphens only, starting with a letter", name)
+	}
+	return nil
+}
 
 // CachedTokenCredential implements azcore.TokenCredential using a cached Azure AD token
 type CachedTokenCredential struct {
@@ -51,6 +69,9 @@ func ExtractKeyvaultName(obj *unstructured.Unstructured) (string, error) {
 	}
 	if !found || keyvaultName == "" {
 		return "", fmt.Errorf("keyvaultName not found in spec.parameters")
+	}
+	if err := ValidateKeyvaultName(keyvaultName); err != nil {
+		return "", err
 	}
 
 	slog.Info("Extracted keyvaultName",

@@ -26,7 +26,7 @@ func TestReconcileResource_MissingServiceAccount(t *testing.T) {
 	spc.Namespace = "default"
 	spc.Spec.Parameters = map[string]string{
 		"clientID":     "test-client-id",
-		"tenantId":     "test-tenant-id",
+		"tenantId":     "11111111-2222-3333-4444-555555555555",
 		"keyvaultName": "test-vault",
 	}
 
@@ -50,7 +50,7 @@ func TestReconcileResource_MissingClientID(t *testing.T) {
 		annotationServiceAccount: "test-sa",
 	}
 	spc.Spec.Parameters = map[string]string{
-		"tenantId":     "test-tenant-id",
+		"tenantId":     "11111111-2222-3333-4444-555555555555",
 		"keyvaultName": "test-vault",
 	}
 
@@ -59,6 +59,56 @@ func TestReconcileResource_MissingClientID(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "missing clientID")
+}
+
+// TestReconcileResource_SSRFPayloadRejected_Regression is a direct regression test for gh-68:
+// annotation-mode SecretProviderClass reads keyvaultName/tenantId straight from a
+// third-party CRD's free-form spec.parameters map. Both values previously flowed
+// unvalidated into request/authority URLs (vault.azure.net, AAD authority), so an
+// attacker-controlled value could exfiltrate the controller's live Azure AD token to
+// an attacker-controlled host. This exercises the actual annotation-mode reconcile
+// path (reconcileResource), not just the CRD-mode Extract* helpers, since that's the
+// path the vulnerability was in.
+func TestReconcileResource_SSRFPayloadRejected_Regression(t *testing.T) {
+	t.Run("malicious keyvaultName rejected", func(t *testing.T) {
+		spc := &secretsstorev1.SecretProviderClass{}
+		spc.Name = "test-spc"
+		spc.Namespace = "default"
+		spc.Annotations = map[string]string{
+			annotationServiceAccount: "test-sa",
+		}
+		spc.Spec.Parameters = map[string]string{
+			"clientID":     "test-client-id",
+			"tenantId":     "11111111-2222-3333-4444-555555555555",
+			"keyvaultName": "attacker.example.com/x",
+		}
+
+		ctrl := createTestController()
+		err := ctrl.reconcileResource(context.Background(), spc)
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid keyvaultName")
+	})
+
+	t.Run("malicious tenantId rejected", func(t *testing.T) {
+		spc := &secretsstorev1.SecretProviderClass{}
+		spc.Name = "test-spc"
+		spc.Namespace = "default"
+		spc.Annotations = map[string]string{
+			annotationServiceAccount: "test-sa",
+		}
+		spc.Spec.Parameters = map[string]string{
+			"clientID":     "test-client-id",
+			"tenantId":     "attacker.example.com/x",
+			"keyvaultName": "test-vault",
+		}
+
+		ctrl := createTestController()
+		err := ctrl.reconcileResource(context.Background(), spc)
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid tenantId")
+	})
 }
 
 // TestReconcileResource_MissingTenantID tests error handling when tenantId parameter is missing
@@ -91,7 +141,7 @@ func TestReconcileResource_MissingKeyvaultName(t *testing.T) {
 	}
 	spc.Spec.Parameters = map[string]string{
 		"clientID": "test-client-id",
-		"tenantId": "test-tenant-id",
+		"tenantId": "11111111-2222-3333-4444-555555555555",
 	}
 
 	ctrl := createTestController()
@@ -383,7 +433,7 @@ func createValidSPC() *secretsstorev1.SecretProviderClass {
 	}
 	spc.Spec.Parameters = map[string]string{
 		"clientID":     "test-client-id",
-		"tenantId":     "test-tenant-id",
+		"tenantId":     "11111111-2222-3333-4444-555555555555",
 		"keyvaultName": "test-vault",
 		"objects":      "existing-objects", // Will trigger change detection
 	}

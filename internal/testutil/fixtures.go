@@ -32,7 +32,7 @@ func NewSecretProviderClass(namespace, name string) *SecretProviderClassBuilder 
 				Provider: "azure",
 				Parameters: map[string]string{
 					"keyvaultName": "test-vault",
-					"tenantId":     "test-tenant-id",
+					"tenantId":     "11111111-2222-3333-4444-555555555555",
 				},
 			},
 		},
@@ -285,7 +285,7 @@ func SPCWithInvalidKeyvault() *secretsstorev1.SecretProviderClass {
 func DefaultServiceAccount() *corev1.ServiceAccount {
 	return NewServiceAccount("default", "test-sa").
 		WithAzureClientID("test-client-id").
-		WithAzureTenantID("test-tenant-id").
+		WithAzureTenantID("11111111-2222-3333-4444-555555555555").
 		Build()
 }
 
