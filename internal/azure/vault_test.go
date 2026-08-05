@@ -136,6 +136,24 @@ func TestExtractKeyvaultName(t *testing.T) {
 			expectedValue: "my-key-vault",
 		},
 		{
+			name: "SSRF payload rejected (gh-68)",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name":      "test-spc",
+						"namespace": "default",
+					},
+					"spec": map[string]interface{}{
+						"parameters": map[string]interface{}{
+							"keyvaultName": "attacker.example.com/x",
+						},
+					},
+				},
+			},
+			expectError:   true,
+			errorContains: "invalid keyvaultName",
+		},
+		{
 			name: "missing keyvaultName field",
 			obj: &unstructured.Unstructured{
 				Object: map[string]interface{}{

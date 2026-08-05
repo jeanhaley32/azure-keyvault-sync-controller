@@ -275,13 +275,31 @@ func TestExtractTenantID(t *testing.T) {
 					},
 					"spec": map[string]interface{}{
 						"parameters": map[string]interface{}{
-							"tenantId": "tenant-id-12345",
+							"tenantId": "11111111-2222-3333-4444-555555555555",
 						},
 					},
 				},
 			},
 			expectError:   false,
-			expectedValue: "tenant-id-12345",
+			expectedValue: "11111111-2222-3333-4444-555555555555",
+		},
+		{
+			name: "SSRF payload rejected (gh-68)",
+			obj: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"name":      "test-spc",
+						"namespace": "default",
+					},
+					"spec": map[string]interface{}{
+						"parameters": map[string]interface{}{
+							"tenantId": "attacker.example.com/x",
+						},
+					},
+				},
+			},
+			expectError:   true,
+			errorContains: "invalid tenantId",
 		},
 		{
 			name: "missing tenantID field",

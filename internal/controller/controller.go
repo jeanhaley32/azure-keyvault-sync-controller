@@ -269,6 +269,15 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	if !ok {
 		return fmt.Errorf("missing tenantId in spec.parameters")
 	}
+	// Annotation-mode SPCs read tenantId straight from a third-party CRD's
+	// free-form spec.parameters map, unlike the CRD-based AzureKeyVaultSync
+	// path where kubebuilder validation constrains it at the API server.
+	// tenantID feeds the AAD authority URL used to exchange this SA's token
+	// for an Azure AD token, so validate it here to close the same class of
+	// SSRF/token-exfiltration risk as keyvaultName below (gh-68).
+	if err := azure.ValidateTenantID(tenantID); err != nil {
+		return fmt.Errorf("invalid tenantId in spec.parameters: %w", err)
+	}
 
 	// Get Azure AD token
 	azureToken, azureTokenExpiration, err := ctrl.tokenProvider.GetAzureToken(
@@ -290,6 +299,13 @@ func (ctrl *Controller) reconcileResource(ctx context.Context, obj *secretsstore
 	keyvaultName, ok := obj.Spec.Parameters["keyvaultName"]
 	if !ok {
 		return fmt.Errorf("missing keyvaultName in spec.parameters")
+	}
+	// keyvaultName is interpolated directly into the vault request URL
+	// (fmt.Sprintf("https://%s.vault.azure.net", vaultName)); an unvalidated
+	// value like "attacker.example.com/x" sends this controller's live
+	// Azure AD token to an attacker-controlled host. See gh-68.
+	if err := azure.ValidateKeyvaultName(keyvaultName); err != nil {
+		return fmt.Errorf("invalid keyvaultName in spec.parameters: %w", err)
 	}
 
 	// List secrets from vault with tags (protected by circuit breaker)
