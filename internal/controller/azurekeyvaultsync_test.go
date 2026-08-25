@@ -44,7 +44,7 @@ func TestGenerateSecretProviderClass(t *testing.T) {
 			},
 			secrets:                []azure.VaultSecret{},
 			expectedSPCName:        "test-akv",
-			expectedParameterCount: 3, // keyvaultName, tenantId, clientID
+			expectedParameterCount: 4, // keyvaultName, tenantId, clientID, objects (empty array, still a valid desired state)
 			expectedOwnerRefCount:  1,
 			expectedControllerOwned: true,
 			expectedBlockDeletion:  true,
@@ -71,7 +71,7 @@ func TestGenerateSecretProviderClass(t *testing.T) {
 			},
 			secrets:                 []azure.VaultSecret{},
 			expectedSPCName:         "orphan-akv",
-			expectedParameterCount:  3,
+			expectedParameterCount:  4,
 			expectedOwnerRefCount:   1,
 			expectedControllerOwned: true,
 			expectedBlockDeletion:   false, // Orphan policy should not block deletion
@@ -207,6 +207,39 @@ func TestGenerateSecretProviderClass_SecretObjectTag(t *testing.T) {
 	assert.Contains(t, objectsStr, "normal-secret")
 	assert.Contains(t, objectsStr, "secret-with-object-tag")
 	assert.Contains(t, objectsStr, "another-normal-secret")
+}
+
+// TestZeroSecretMatchProducesValidSPC guards against the staleness bug in
+// GH issue #69: a CRD-mode AzureKeyVaultSync that legitimately matches zero
+// secrets (last tagged secret deleted, filters tightened, etc.) must still
+// produce an SPC that passes validation, so reconcile can update status
+// instead of erroring out and leaving a stale SPC in place.
+func TestZeroSecretMatchProducesValidSPC(t *testing.T) {
+	akv := &akvv1alpha1.AzureKeyVaultSync{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-akv",
+			Namespace: "default",
+			UID:       "test-uid",
+		},
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "azure-keyvault-sync.io/v1alpha1",
+			Kind:       "AzureKeyVaultSync",
+		},
+		Spec: akvv1alpha1.AzureKeyVaultSyncSpec{
+			KeyvaultName: "my-vault",
+			TenantID:     "tenant-123",
+			ClientID:     "client-123",
+			DeletePolicy: akvv1alpha1.DeletePolicyCascade,
+		},
+	}
+
+	spc := generateSecretProviderClass(akv, []azure.VaultSecret{})
+
+	assert.Contains(t, spc.Spec.Parameters, "objects")
+	assert.Equal(t, "array: []\n", spc.Spec.Parameters["objects"])
+
+	err := validateSecretProviderClass(spc)
+	assert.NoError(t, err, "a zero-secret match is a valid desired state and must not fail validation")
 }
 
 func TestBuildObjectsArrayString(t *testing.T) {
